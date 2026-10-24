@@ -99,6 +99,9 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 - Every behavior change to sync semantics needs an integration test that drives the fake
   through the scenario (edit, move, trash, failure, …) and asserts on table contents.
 - Run `ruff check src tests && ruff format --check src tests && pytest` before committing.
+- GitHub Actions are pinned by commit SHA with a trailing `# vX.Y.Z` comment, and must run
+  on Node 24 (Node 20 was removed from runners on 2026-09-23). Dependabot keeps the pins
+  current; when bumping by hand, check the action's `action.yml` says `using: node24`.
 
 ## Assumptions about the Confluence DC API (verify against your instance)
 
