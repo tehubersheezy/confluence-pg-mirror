@@ -1,0 +1,35 @@
+<h1>Overview&nbsp;&mdash; synthetic</h1>
+<p>See <ac:link><ri:page ri:content-title="Child Page" /><ac:plain-text-link-body><![CDATA[the child]]></ac:plain-text-link-body></ac:link>
+and <ac:link><ri:page ri:space-key="OTHER" ri:content-title="Elsewhere" /></ac:link>,
+<a href="https://confluence.example.com/pages/viewpage.action?pageId=1003">by id</a>,
+<a href="/display/DEMO/Root+Page#top">display</a>, <a href="https://example.org/docs">external</a>
+and <a href="#local">anchor</a>.</p>
+<ac:structured-macro ac:name="info" ac:schema-version="1" ac:macro-id="m-info-1">
+  <ac:parameter ac:name="title">Heads up</ac:parameter>
+  <ac:rich-text-body>
+    <p>Outer body with a <ac:link><ri:user ri:userkey="u-123" /></ac:link>.</p>
+    <ac:structured-macro ac:name="code" ac:schema-version="1" ac:macro-id="m-code-1">
+      <ac:parameter ac:name="language">python</ac:parameter>
+      <ac:plain-text-body><![CDATA[print("a < b & c")]]></ac:plain-text-body>
+    </ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>
+<ac:structured-macro ac:name="details" ac:schema-version="1" ac:macro-id="m-details-1">
+  <ac:parameter ac:name="id">props</ac:parameter>
+  <ac:rich-text-body>
+    <table><tbody>
+      <tr><th>Owner</th><td><ac:link><ri:user ri:userkey="u-456" /></ac:link></td></tr>
+      <tr><th>Status</th><td><ac:structured-macro ac:name="status" ac:schema-version="1"><ac:parameter ac:name="colour">Green</ac:parameter><ac:parameter ac:name="title">DONE</ac:parameter></ac:structured-macro></td></tr>
+    </tbody></table>
+  </ac:rich-text-body>
+</ac:structured-macro>
+<table><tbody>
+  <tr><th>Name</th><th>Value</th></tr>
+  <tr><td>alpha</td><td>1</td></tr>
+  <tr><td>beta</td><td><table><tbody><tr><td>nested</td></tr></tbody></table></td></tr>
+</tbody></table>
+<ac:structured-macro ac:name="include" ac:schema-version="1">
+  <ac:parameter ac:name=""><ac:link><ri:page ri:content-title="Shared Snippet" /></ac:link></ac:parameter>
+</ac:structured-macro>
+<p><ac:image ac:alt="diagram"><ri:attachment ri:filename="diagram.png" /></ac:image>
+<ac:link><ri:attachment ri:filename="spec.pdf"><ri:page ri:content-title="Child Page" /></ri:attachment></ac:link></p>

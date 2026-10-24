@@ -1,0 +1,39 @@
+# confluence-pg-mirror configuration template.
+# Copy to ./config.toml (git-ignored) or pass --config PATH.
+# The PAT is NEVER read from this file: set CONFLUENCE_PAT in the environment or .env.
+
+[confluence]
+# Base URL including any context path, e.g. https://confluence.example.com/confluence
+base_url = "https://confluence.example.com"
+# Seconds per HTTP request.
+timeout = 60
+# Page size for paginated REST calls (Confluence caps this server-side).
+page_size = 50
+# Retries for 429/5xx/network errors, with exponential backoff (honors Retry-After).
+max_retries = 5
+backoff_base = 1.0
+# TLS verification is always on. To trust a corporate CA, either:
+#   ca_bundle = "/Users/you/certs/corp-root.pem"
+# or use the macOS Keychain via the optional `truststore` extra:
+#   use_system_truststore = true
+use_system_truststore = false
+
+[database]
+# libpq connection string; prefer ~/.pgpass or PG* env vars for passwords.
+dsn = "postgresql:///confluence_mirror"
+
+[sync]
+# Spaces synced by `confluence-mirror sync --all`.
+spaces = ["DEMO"]
+# Content types to mirror: "page" and optionally "blogpost".
+content_types = ["page"]
+# Abort the deletion phase if more than this fraction of known pages vanished
+# from a listing (protects against permission glitches wiping the mirror).
+max_delete_fraction = 0.5
+# Overlap window (minutes) applied to the incremental cursor for CQL queries.
+incremental_overlap_minutes = 1440
+# Re-fetch labels/properties/restrictions/attachments for unchanged pages
+# during incremental sync (slower, catches metadata-only edits).
+refresh_unchanged_metadata = false
+# Optional: download attachment binaries to this directory (metadata is always mirrored).
+# attachment_dir = "./attachments"

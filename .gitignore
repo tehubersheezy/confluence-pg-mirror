@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local configuration and secrets — never commit
+.env
+.env.*
+!.env.example
+config.toml
+config/*.toml
+!config/config.example.toml
+*.pem
+*.key
+
+# Local data
+pgdata/
+attachments/
+*.log
+.DS_Store

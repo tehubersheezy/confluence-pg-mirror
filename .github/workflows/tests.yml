@@ -1,0 +1,57 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+
+  test-linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      # The runner ships PostgreSQL binaries; the test fixture boots a throwaway
+      # cluster on a Unix socket with initdb/pg_ctl — the same admin-free path as macOS.
+      CPM_REQUIRE_POSTGRES: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Put PostgreSQL binaries on PATH
+        run: echo "$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)" >> "$GITHUB_PATH"
+      - run: pip install -e '.[dev]'
+      - run: pytest -v
+
+  test-macos:
+    runs-on: macos-latest
+    env:
+      CPM_REQUIRE_POSTGRES: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install PostgreSQL (user space)
+        run: |
+          brew install postgresql@16
+          echo "$(brew --prefix postgresql@16)/bin" >> "$GITHUB_PATH"
+      - run: pip install -e '.[dev]'
+      - run: pytest -v
