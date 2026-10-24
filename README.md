@@ -216,7 +216,9 @@ cluster on a private Unix socket and delete it afterwards. Alternatively, set
 recreated, so never point it at real data. All test data is synthetic: an in-memory fake
 Confluence in `tests/fake_confluence.py` and storage fixtures in `tests/fixtures/`.
 
-See [AGENTS.md](AGENTS.md) for architecture decisions and conventions.
+See [AGENTS.md](AGENTS.md) for architecture decisions and conventions, and
+[docs/agent-setup-prompt.md](docs/agent-setup-prompt.md) for a step-by-step prompt that lets a
+coding agent do the macOS setup for you.
 
 ## Limitations
 
