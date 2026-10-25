@@ -74,8 +74,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     s.add_argument(
         "--properties",
         choices=PROPERTY_MODES,
-        help="content properties for this run: known (default; no extra requests), "
-        "all (one request per fetched page; finds new keys), none",
+        help="content properties for this run: none (default; no requests) or "
+        "all (one request per fetched page)",
     )
 
     sp = group(sub, "spaces", "spaces")

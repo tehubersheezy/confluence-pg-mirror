@@ -422,16 +422,6 @@ def upsert_page_properties(conn, page_id: int, rows: list[dict], run_id: int) ->
         )
 
 
-def space_property_keys(conn: psycopg.Connection, space_id: int) -> list[str]:
-    """Distinct content-property keys stored for the pages of a space."""
-    cur = conn.execute(
-        "SELECT DISTINCT pp.property_key FROM source.page_properties pp "
-        "JOIN source.pages p USING (page_id) WHERE p.space_id = %s ORDER BY 1",
-        (space_id,),
-    )
-    return [r[0] for r in cur.fetchall()]
-
-
 def replace_restrictions(conn, page_id: int, rows: list[dict], run_id: int) -> None:
     _reconcile(
         conn,

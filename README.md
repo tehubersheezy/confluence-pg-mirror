@@ -18,8 +18,8 @@ need PostgreSQL, Python ≥ 3.11 and a personal access token (PAT).
   `position`).
 - **All body representations**: `body.storage`, `body.view` and `body.export_view` for every
   page, including parent pages.
-- **Metadata**: labels, content properties, space properties, attachment metadata (binaries
-  optional), and direct read/update restrictions.
+- **Metadata**: labels, attachment metadata (binaries optional), direct read/update
+  restrictions, and optionally content and space properties.
 - **Extraction**: macros with their parameters, IDs, nesting and bodies; macro-specific
   interpretations (code, panels, Jira, include/excerpt, page properties, status, …); tables
   as cells and header-keyed records; links (page, attachment, user, space, URL, anchor,
@@ -222,22 +222,20 @@ or advance the space cursor.
 |---|---|
 | list a space of N pages | about N / 200 (`/content/scan`; offset `/content` paging on servers without it) |
 | fetch C new or changed pages | about C / 50 (`id in (...)` with every expansion) |
-| content properties, `page_properties = "known"` (default) or a key list | none (inside the batches) |
-| content properties, `page_properties = "all"` | one more per fetched page |
+| content properties, `page_properties = "all"` | one more per fetched page, plus one per space |
 | labels or attachments beyond the expansion limit | one more per affected page |
 
-Confluence has no bulk listing of content properties, only per-key expansions. By default
-(`"known"`) a sync expands the property keys the mirror already holds for that space, so
-properties cost no extra requests. To discover keys (the first time, or now and then), run
-one sync with every key, which costs one request per fetched page:
+Content properties are off by default (`page_properties = "none"`): Confluence has no bulk
+listing for them, so fetching them costs a request per page. Stored properties are left as
+they were. To fetch them once, or on a schedule of your choosing:
 
 ```bash
 confex sync --space DEMO --reconcile --properties all
 ```
 
-Expanded keys are only ever added or updated; a property deleted in Confluence is noticed
-by the next `--properties all` run. A fixed key list (`page_properties = ["owner"]`) works
-the same way as `"known"`, and `"none"` leaves stored properties alone.
+A key list (`page_properties = ["owner"]`) fetches just those keys inside the batch
+requests at no extra cost, if your server honours `metadata.properties.<key>` expansions in
+search results. Those keys are only ever added or updated, never deleted.
 
 Requests are spaced to `max_requests_per_second` (default 5; `0` turns the limit off). A
 429 response is retried after `Retry-After`, and the client halves its rate for the rest

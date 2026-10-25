@@ -47,8 +47,6 @@ from confluence_mirror.logging_utils import redact
 log = logging.getLogger(__name__)
 
 MAX_RECORDED_ERRORS = 500
-# Keeps batch URLs a sane length; a space rarely has more distinct property keys.
-MAX_EXPANDED_PROPERTY_KEYS = 40
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # Global keys are alphanumeric; personal spaces are "~username".
 SPACE_KEY_RE = re.compile(r"^~?[A-Za-z0-9_.\-@]{1,255}$")
@@ -140,12 +138,8 @@ class SpaceSync:
         self.settings = settings
         self._counts_at_start: tuple[dict[str, int], dict[str, int]] = ({}, {})
         keys = settings.page_properties if isinstance(settings.page_properties, tuple) else ()
-        self._set_property_keys(keys)
-
-    def _set_property_keys(self, keys: tuple[str, ...]) -> None:
-        """The content-property keys fetched inside batch requests, and the expansions."""
-        self._property_keys = keys
-        self._bulk = bulk_expand(self.settings.representations, keys)
+        self._property_keys: tuple[str, ...] = keys
+        self._bulk = bulk_expand(settings.representations, keys)
         restrictions = ",".join(p for p in self._bulk.split(",") if p.startswith("restrictions."))
         props = ",".join(f"metadata.properties.{k}" for k in keys)
         # Everything except bodies, for metadata refreshes of unchanged pages.
@@ -347,8 +341,9 @@ class SpaceSync:
         space = models.space_row(space_json)
         space_id = space["space_id"]
         repo.upsert_space(self.conn, space, run_id)
-        props = [models.property_row(p) for p in self.client.space_properties(report.space_key)]
-        repo.replace_space_properties(self.conn, space_id, props, run_id)
+        if self.settings.page_properties == "all":
+            props = [models.property_row(p) for p in self.client.space_properties(report.space_key)]
+            repo.replace_space_properties(self.conn, space_id, props, run_id)
         self.conn.commit()
 
         fetched: set[int] = set()
@@ -414,11 +409,6 @@ class SpaceSync:
 
         Returns (page IDs seen, page IDs fetched).
         """
-        if self.settings.page_properties == "known":
-            # Keys already mirrored for this space come inside the batches, for free.
-            keys = tuple(k for k in repo.space_property_keys(self.conn, space_id) if "," not in k)
-            self._set_property_keys(keys[:MAX_EXPANDED_PROPERTY_KEYS])
-            report.stats["property_keys"] = len(self._property_keys)
         # Parents first, so hierarchy and same-space links fill in top-down.
         pairs = sorted(
             ((item, models.page_row(item)) for item in listing),

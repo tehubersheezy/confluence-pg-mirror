@@ -188,8 +188,8 @@ def test_negative_rate_rejected(tmp_path):
         load_settings(write(tmp_path, text), env={})
 
 
-def test_page_properties_default_is_known(tmp_path):
+def test_page_properties_default_is_none(tmp_path):
     s = load_settings(write(tmp_path, BASE), env={})
-    assert s.sync.page_properties == "known"
+    assert s.sync.page_properties == "none"
     text = BASE.replace("[sync]", '[sync]\npage_properties = "all"')
     assert load_settings(write(tmp_path, text), env={}).sync.page_properties == "all"

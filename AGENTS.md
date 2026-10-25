@@ -63,10 +63,10 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
   fetch changed pages in `id in (...)` batches.
 - **Bulk first.** Rate limits are the binding constraint. Listing uses `/content/scan`;
   bodies and metadata come in batches with expansions; per-page endpoints are fallbacks only
-  for truncated expansions or a failed batch. Content properties come from per-key
-  `metadata.properties.<key>` expansions of the keys already mirrored (`"known"`); the
-  per-page `/property` call is opt-in (`--properties all`). Expanded properties are
-  upsert-only, because a missing key in an expansion does not prove deletion. Don't add a
+  for truncated expansions or a failed batch. Content properties are off by default
+  (`page_properties = "none"`); the per-page `/property` call is opt-in
+  (`--properties all`). Properties from a key-list expansion are upsert-only, because a
+  missing key in an expansion does not prove deletion. Don't add a
   per-page request to the common path without a reason, and check
   `sync_runs.stats.http_requests` in tests when you touch it.
 - **Transactions.** Network calls for a page (or its batch) happen first, then one short
