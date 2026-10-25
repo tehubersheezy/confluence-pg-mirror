@@ -410,6 +410,28 @@ def replace_page_properties(conn, page_id: int, rows: list[dict], run_id: int) -
     _reconcile(conn, "source.page_properties", page_id, rows, ["property_key"], run_id)
 
 
+def upsert_page_properties(conn, page_id: int, rows: list[dict], run_id: int) -> None:
+    """Add or update the given keys only; other stored properties are left alone."""
+    for row in rows:
+        _upsert(
+            conn,
+            "source.page_properties",
+            dict(row, page_id=page_id, last_sync_run_id=run_id),
+            ["page_id", "property_key"],
+            extra_update="last_seen_at = now()",
+        )
+
+
+def space_property_keys(conn: psycopg.Connection, space_id: int) -> list[str]:
+    """Distinct content-property keys stored for the pages of a space."""
+    cur = conn.execute(
+        "SELECT DISTINCT pp.property_key FROM source.page_properties pp "
+        "JOIN source.pages p USING (page_id) WHERE p.space_id = %s ORDER BY 1",
+        (space_id,),
+    )
+    return [r[0] for r in cur.fetchall()]
+
+
 def replace_restrictions(conn, page_id: int, rows: list[dict], run_id: int) -> None:
     _reconcile(
         conn,

@@ -222,14 +222,28 @@ or advance the space cursor.
 |---|---|
 | list a space of N pages | about N / 200 (`/content/scan`; offset `/content` paging on servers without it) |
 | fetch C new or changed pages | about C / 50 (`id in (...)` with every expansion) |
+| content properties, `page_properties = "known"` (default) or a key list | none (inside the batches) |
 | content properties, `page_properties = "all"` | one more per fetched page |
 | labels or attachments beyond the expansion limit | one more per affected page |
 
-Content properties have no bulk listing, so `page_properties = "all"` (the default) costs a
-request per fetched page. Set `page_properties = ["key1", "key2"]` to fetch named keys in
-the batch instead, or `"none"` to leave stored properties untouched. Requests are spaced to
-`max_requests_per_second` (default 5; `0` turns the limit off), and 429 responses are
-retried after `Retry-After`.
+Confluence has no bulk listing of content properties, only per-key expansions. By default
+(`"known"`) a sync expands the property keys the mirror already holds for that space, so
+properties cost no extra requests. To discover keys (the first time, or now and then), run
+one sync with every key, which costs one request per fetched page:
+
+```bash
+confex sync --space DEMO --reconcile --properties all
+```
+
+Expanded keys are only ever added or updated; a property deleted in Confluence is noticed
+by the next `--properties all` run. A fixed key list (`page_properties = ["owner"]`) works
+the same way as `"known"`, and `"none"` leaves stored properties alone.
+
+Requests are spaced to `max_requests_per_second` (default 5; `0` turns the limit off). A
+429 response is retried after `Retry-After`, and the client halves its rate for the rest
+of the run (down to 0.25/s). Each run records its requests in `sync_runs.stats`:
+`http_requests` per endpoint, plus `http_retries` by status and the final
+`requests_per_second` when anything was retried.
 
 Restrictions and content properties change without a version bump. Incremental runs refresh
 them only for changed pages, unless `refresh_unchanged_metadata = true` (slower). A

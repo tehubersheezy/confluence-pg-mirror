@@ -47,6 +47,8 @@ from confluence_mirror.logging_utils import redact
 log = logging.getLogger(__name__)
 
 MAX_RECORDED_ERRORS = 500
+# Keeps batch URLs a sane length; a space rarely has more distinct property keys.
+MAX_EXPANDED_PROPERTY_KEYS = 40
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # Global keys are alphanumeric; personal spaces are "~username".
 SPACE_KEY_RE = re.compile(r"^~?[A-Za-z0-9_.\-@]{1,255}$")
@@ -81,6 +83,10 @@ class Scope:
         else:
             out["cql"] = self.cql
         return out
+
+
+def _delta(now: dict[str, int], before: dict[str, int]) -> dict[str, int]:
+    return {k: v - before.get(k, 0) for k, v in sorted(now.items()) if v > before.get(k, 0)}
 
 
 def _chunks(items: list, size: int):
@@ -132,9 +138,14 @@ class SpaceSync:
         self.conn = conn
         self.client = client
         self.settings = settings
+        self._counts_at_start: tuple[dict[str, int], dict[str, int]] = ({}, {})
         keys = settings.page_properties if isinstance(settings.page_properties, tuple) else ()
-        self._property_keys: tuple[str, ...] = keys
-        self._bulk = bulk_expand(settings.representations, keys)
+        self._set_property_keys(keys)
+
+    def _set_property_keys(self, keys: tuple[str, ...]) -> None:
+        """The content-property keys fetched inside batch requests, and the expansions."""
+        self._property_keys = keys
+        self._bulk = bulk_expand(self.settings.representations, keys)
         restrictions = ",".join(p for p in self._bulk.split(",") if p.startswith("restrictions."))
         props = ",".join(f"metadata.properties.{k}" for k in keys)
         # Everything except bodies, for metadata refreshes of unchanged pages.
@@ -262,6 +273,8 @@ class SpaceSync:
         self.conn.commit()
         if not locked:
             raise SyncLockedError(f"space {space_key} is already being synced")
+        # Request counts in the run's stats cover this space only.
+        self._counts_at_start = (dict(self.client.request_counts), dict(self.client.retry_counts))
         try:
             return body()
         finally:
@@ -298,7 +311,12 @@ class SpaceSync:
         return report
 
     def _finish(self, report: SyncReport) -> None:
-        report.stats["http_requests"] = dict(sorted(self.client.request_counts.items()))
+        before, retries_before = self._counts_at_start
+        report.stats["http_requests"] = _delta(self.client.request_counts, before)
+        retries = _delta(self.client.retry_counts, retries_before)
+        if retries:
+            report.stats["http_retries"] = retries
+            report.stats["requests_per_second"] = self.client.rate
         repo.finish_run(
             self.conn,
             report.sync_run_id,
@@ -396,6 +414,11 @@ class SpaceSync:
 
         Returns (page IDs seen, page IDs fetched).
         """
+        if self.settings.page_properties == "known":
+            # Keys already mirrored for this space come inside the batches, for free.
+            keys = tuple(k for k in repo.space_property_keys(self.conn, space_id) if "," not in k)
+            self._set_property_keys(keys[:MAX_EXPANDED_PROPERTY_KEYS])
+            report.stats["property_keys"] = len(self._property_keys)
         # Parents first, so hierarchy and same-space links fill in top-down.
         pairs = sorted(
             ((item, models.page_row(item)) for item in listing),
@@ -485,14 +508,30 @@ class SpaceSync:
             report.stats["attachment_fallbacks"] = report.stats.get("attachment_fallbacks", 0) + 1
         return [models.attachment_row(a, page_id) for a in items]
 
-    def _properties(self, content: dict, page_id: int) -> list[dict] | None:
-        """None means "leave stored properties alone" (page_properties = "none")."""
+    def _properties(self, content: dict, page_id: int) -> tuple[list[dict], bool] | None:
+        """Rows, and whether they are the page's complete set (only for "all").
+
+        None means "leave stored properties alone". Expanded keys are only ever added or
+        updated: an absent key may mean the server did not expand it, not that it is gone.
+        """
         policy = self.settings.page_properties
         if policy == "none":
             return None
         if policy == "all":
-            return [models.property_row(p) for p in self.client.content_properties(page_id)]
-        return models.expanded_properties(content, self._property_keys)
+            rows = [models.property_row(p) for p in self.client.content_properties(page_id)]
+            return rows, True
+        if not self._property_keys:
+            return None
+        return models.expanded_properties(content, self._property_keys), False
+
+    def _write_properties(self, page_id: int, props, run_id: int) -> None:
+        if props is None:
+            return
+        rows, complete = props
+        if complete:
+            repo.replace_page_properties(self.conn, page_id, rows, run_id)
+        else:
+            repo.upsert_page_properties(self.conn, page_id, rows, run_id)
 
     def _restrictions(self, content: dict, page_id: int, report: SyncReport) -> list[dict]:
         restrictions, complete = models.restriction_rows(content)
@@ -525,8 +564,7 @@ class SpaceSync:
                     {"page_id": page_id, "representations": changed}
                 )
             repo.replace_labels(self.conn, page_id, labels, run_id)
-            if props is not None:
-                repo.replace_page_properties(self.conn, page_id, props, run_id)
+            self._write_properties(page_id, props, run_id)
             repo.replace_restrictions(self.conn, page_id, restrictions, run_id)
             repo.sync_attachments(self.conn, page_id, attachments, run_id)
             self._extract(page_id, page["current_version"], content, report)
@@ -571,8 +609,7 @@ class SpaceSync:
                     with self.conn.transaction():
                         if labels is not None:
                             repo.replace_labels(self.conn, page_id, labels, run_id)
-                        if props is not None:
-                            repo.replace_page_properties(self.conn, page_id, props, run_id)
+                        self._write_properties(page_id, props, run_id)
                         if restrictions is not None:
                             repo.replace_restrictions(self.conn, page_id, restrictions, run_id)
                         repo.sync_attachments(self.conn, page_id, attachments, run_id)

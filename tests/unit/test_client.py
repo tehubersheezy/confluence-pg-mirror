@@ -241,3 +241,14 @@ def test_scan_repeated_cursor_is_an_error():
     client = ConfluenceClient(settings, TOKEN, transport=httpx.MockTransport(handler))
     with pytest.raises(ConfluenceError, match="loop"):
         list(client.scan_content("X", "page", "version", limit=1))
+
+
+def test_429_halves_the_rate_for_the_rest_of_the_run():
+    fake = FakeConfluence()
+    demo_space(fake, "<p>x</p>")
+    fake.fail(r"/rest/api/content/1001$", 429, 429, 503)
+    client, sleeps = make(fake)  # unlimited until rate-limited
+    client.get_content(1001, expand="version")
+    assert client.rate == 1.0  # 0 (none) -> 2.0 -> 1.0; a 503 does not slow down
+    assert client.retry_counts == {"429": 2, "503": 1}
+    assert client.request_counts == {"/rest/api/content/{id}": 4}

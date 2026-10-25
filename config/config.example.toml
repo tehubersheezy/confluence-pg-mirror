@@ -13,6 +13,7 @@ page_size = 50
 max_retries = 5
 backoff_base = 1.0
 # Client-side rate limit, applied to every request including retries. 0 = unlimited.
+# A 429 halves it for the rest of the run.
 max_requests_per_second = 5.0
 # TLS verification is always on. To trust a corporate CA, either:
 #   ca_bundle = "/Users/you/certs/corp-root.pem"
@@ -44,9 +45,13 @@ listing = "auto"
 listing_page_size = 200
 # Changed pages fetched per request with bodies and metadata (the server caps this at 50).
 body_batch_size = 50
-# Content properties: "all" (one extra request per fetched page), "none" (left as stored),
-# or a list of keys fetched inside the batch requests, e.g. ["owner", "review-date"].
-page_properties = "all"
+# Content properties:
+#   "known" - the keys already mirrored for the space, inside the batch requests (free);
+#   "all"   - every key, one extra request per fetched page (discovers keys and removals);
+#   "none"  - leave stored properties alone;
+#   a list  - those keys, inside the batch requests, e.g. ["owner", "review-date"].
+# Discover keys once with: confex sync --space KEY --reconcile --properties all
+page_properties = "known"
 # Optional: download attachment binaries to this directory (metadata is always mirrored).
 # attachment_dir = "./attachments"
 # Body representations fetched per page (storage is required).

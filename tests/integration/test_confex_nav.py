@@ -48,7 +48,7 @@ def requests_made(fake):
 
 
 def test_page_metadata_commands(env, conn, capsys):
-    assert sync(conn, env).status == "succeeded"
+    assert sync(conn, env, page_properties="all").status == "succeeded"
     before = requests_made(env)
 
     code, e = run(capsys, "pages", "labels", "1001")
