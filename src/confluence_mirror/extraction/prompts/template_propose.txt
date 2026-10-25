@@ -1,0 +1,14 @@
+The pages below are children of one parent page; none of them has children of its own.
+Decide whether these children follow a common template.
+
+If they do, set follows_template to true and describe the template:
+- name and description: what kind of page this is, in a few words;
+- sections: the headings every page of the template is expected to have, in order;
+- tables: each recurring table, with a short key, the heading it sits under, its layout
+  (header_row: column headers in the first row; key_column: labels in the first column;
+  other), its purpose, and for each column (or each label of a key_column table) the header
+  text, a snake_case field name, the best type from the allowed list, and a description;
+- deviating_pages: shown pages that do not follow the template, with the reason.
+
+If they do not share a template, set follows_template to false, leave sections and tables
+empty, and explain why in reason. Use confidence to say how sure you are.

@@ -1,0 +1,8 @@
+Check each page below against the proposed template. For every page, give its page_id and
+whether it conforms. A page conforms when it has the template's sections and tables with the
+template's columns; optional extras and different row counts are fine. List what is missing
+and what is unexpected, and add a short note.
+
+Answer for every page shown, once each, and for no other page. Under template_issues, note
+any part of the template itself that looks wrong given these pages (for example a column
+that no page has).

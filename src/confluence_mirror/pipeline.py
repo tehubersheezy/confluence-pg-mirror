@@ -25,6 +25,7 @@ from confluence_mirror import repository_pipeline as prepo
 from confluence_mirror.config import ConfexSettings
 from confluence_mirror.extraction import classify as cls
 from confluence_mirror.extraction import payload as pl
+from confluence_mirror.extraction import templates as tpl
 from confluence_mirror.extraction import validation as val
 from confluence_mirror.extraction.candidates import build_candidates
 from confluence_mirror.extraction.privacy import egress_decision
@@ -198,6 +199,14 @@ class Options:
     extractor: str = "auto"  # auto | rules | model
     force: bool = False
     model_classification: bool = False
+
+
+@dataclass
+class TemplateOptions:
+    min_children: int = 2
+    sample: int = 8
+    dry_run: bool = False
+    force: bool = False
 
 
 @dataclass
@@ -532,6 +541,197 @@ class Pipeline:
                 "approval_reference": self.settings.privacy.approval_reference or None,
             },
         }
+
+    # -- template detection ---------------------------------------------------------------
+
+    def detect_templates(
+        self, *, space_key: str | None, root_id: int | None, opts: TemplateOptions
+    ) -> dict:
+        """Find parents whose children are all leaves; ask the model if they share a template.
+
+        Candidates are found in the mirror. For each, the model proposes a template from a
+        sample of the children and then checks every child against it. A dry run lists the
+        candidates and estimated tokens, and calls nothing.
+        """
+        if (space_key is None) == (root_id is None):
+            raise ConfexError(
+                "ARGUMENT_CONFLICT", "give exactly one of --space or --root", EXIT_USAGE
+            )
+        space_id = ins._space(self.conn, space_key)["space_id"] if space_key else None
+        if root_id is not None:
+            ins._page(self.conn, root_id)
+        candidates = prepo.template_candidates(
+            self.conn, space_id=space_id, root_id=root_id, min_children=opts.min_children
+        )
+        self.conn.rollback()
+        budget = Budget(
+            {k: v for k, v in vars(self.settings.budgets).items() if k != "per_item_retries"},
+            self.settings.pricing.get(self.model["model"]),
+        )
+        problems = budget.check_configuration()
+        if problems:
+            raise ConfexError("BUDGET_UNENFORCEABLE", "; ".join(problems), EXIT_USAGE)
+        items = [self._detect_one(c, opts, budget) for c in candidates]
+        counts: dict[str, int] = {}
+        for i in items:
+            counts[i["status"]] = counts.get(i["status"], 0) + 1
+        return {
+            "scope": {"space": space_key, "root": root_id, "min_children": opts.min_children},
+            "dry_run": opts.dry_run,
+            "candidates": len(candidates),
+            "counts": counts,
+            "items": items,
+            "budget": budget.as_dict(),
+        }
+
+    def _detect_one(self, cand: dict, opts: TemplateOptions, budget: Budget) -> dict:
+        parent = repo.get_page(self.conn, cand["page_id"])
+        item: dict[str, Any] = {
+            "parent_page_id": cand["page_id"],
+            "title": cand["title"],
+            "space_key": cand["space_key"],
+            "children": len(cand["children"]),
+        }
+        summaries: dict[int, dict] = {}
+        versions: dict[int, int] = {}
+        for child in cand["children"]:
+            if not child["has_content"]:
+                continue
+            try:
+                resolved = ins.page_artifact(self.conn, child["page_id"], "auto")
+            except ConfexError:
+                continue
+            summaries[child["page_id"]] = tpl.page_summary(
+                resolved.artifact, child["title"], self.settings.privacy
+            )
+            versions[child["page_id"]] = child["version_number"]
+        self.conn.rollback()
+        ids = list(summaries)
+        if len(ids) < opts.min_children:
+            return {
+                **item,
+                "status": "skipped",
+                "reason": f"only {len(ids)} child page(s) have stored bodies; sync the tree first",
+            }
+        sample = tpl.pick_sample(ids, opts.sample)
+        inputs = {
+            "detector": tpl.DETECTOR_VERSION,
+            "prompt": tpl.TEMPLATE_PROMPT_VERSION,
+            "model": self.model,
+            "privacy": self.settings.privacy.digest,
+            "parent": cand["page_id"],
+            "children": [[i, versions[i]] for i in ids],
+            "sample": sample,
+        }
+        input_digest = digest(inputs)
+        detection_id = opaque_id("tmpl", input_digest + (uuid.uuid4().hex if opts.force else ""))
+        stored = None if opts.force else prepo.get_template_detection(self.conn, detection_id)
+        self.conn.rollback()
+        if stored is not None:
+            return {**item, **_detection_summary(stored), "reused": True}
+        request = tpl.proposal_request(
+            {
+                "page_id": parent["page_id"],
+                "title": tpl.clean_text(parent["title"], self.settings.privacy),
+            },
+            len(ids),
+            [summaries[i] for i in sample],
+            self.model,
+        )
+        est = pl.estimate_tokens(request)
+        batches = [ids[i : i + tpl.CHECK_BATCH] for i in range(0, len(ids), tpl.CHECK_BATCH)]
+        if opts.dry_run:
+            check_est = sum(
+                pl.estimate_tokens(tpl.check_request({}, [summaries[i] for i in b], self.model))
+                for b in batches
+            )
+            return {
+                **item,
+                "status": "planned",
+                "with_bodies": len(ids),
+                "sample": sample,
+                "requests": 1 + len(batches),
+                "estimated_input_tokens": est + check_est,
+                "estimate_note": "local estimate (characters / 3.5), excluding the template "
+                "text the check requests will carry",
+            }
+        decision = self.egress(parent)
+        if not decision.allowed:
+            return {
+                **item,
+                "status": "blocked",
+                "reason": "EGRESS_DENIED: " + "; ".join(decision.reasons),
+            }
+        row: dict[str, Any] = {
+            "detection_id": detection_id,
+            "parent_page_id": cand["page_id"],
+            "space_key": cand["space_key"],
+            "input_digest": input_digest,
+            "detector_version": tpl.DETECTOR_VERSION,
+            "prompt_version": tpl.TEMPLATE_PROMPT_VERSION,
+            "model": self.model,
+            "children": [{"page_id": i, "version_number": versions[i]} for i in ids],
+            "sample": sample,
+            "check_attempt_ids": [],
+        }
+        attempt, outcome = self._metered(request, detection_id, "template_propose", budget)
+        if attempt is None:
+            return {**item, "status": "budget_exhausted", "reason": budget.exhausted}
+        row["propose_attempt_id"] = attempt
+        if outcome.status != "succeeded":
+            row.update(
+                status="failed",
+                issues=[f"proposal {outcome.status}: {outcome.error or ''}".strip()],
+            )
+            return {**item, **self._store_detection(row)}
+        proposal, issues = tpl.clean_proposal(outcome.parsed, set(ids))
+        pages: list[dict] = []
+        if proposal.get("follows_template"):
+            template = {k: proposal[k] for k in ("name", "description", "sections", "tables")}
+            answers: list[dict | None] = []
+            for batch in batches:
+                check = tpl.check_request(template, [summaries[i] for i in batch], self.model)
+                attempt, outcome = self._metered(check, detection_id, "template_check", budget)
+                if attempt is not None:
+                    row["check_attempt_ids"].append(attempt)
+                if attempt is None or outcome.status != "succeeded":
+                    reason = budget.exhausted if attempt is None else outcome.status
+                    issues.append(f"check of {len(batch)} page(s) not done: {reason}")
+                    answers.append(None)
+                else:
+                    answers.append(outcome.parsed)
+            pages, check_issues = tpl.merge_checks(answers, batches)
+            issues += check_issues
+        result = tpl.verdict(proposal, pages)
+        row.update(
+            status=result["status"],
+            conformance=result["conformance"],
+            proposal=proposal,
+            pages=pages,
+            issues=issues,
+        )
+        return {**item, **self._store_detection(row)}
+
+    def _metered(
+        self, request: dict, target: str, stage: str, budget: Budget
+    ) -> tuple[str | None, Outcome]:
+        """One model call under the budget; (None, ...) when the budget refuses it."""
+        est = pl.estimate_tokens(request)
+        if budget.exhausted or not budget.reserve(est, request["max_tokens"]):
+            return None, Outcome("budget_exhausted")
+        attempt_id = self._open_attempt(request, target, stage, None, None, 1)
+        try:
+            outcome = self.provider().send(request)
+        except Exception as exc:  # adapter bug or provider unavailable
+            outcome = Outcome("error", error=redact(f"{type(exc).__name__}: {exc}"))
+        self._close_attempt(attempt_id, outcome, budget.settle(est, request["max_tokens"], outcome))
+        return attempt_id, outcome
+
+    def _store_detection(self, row: dict) -> dict:
+        with self.conn.transaction():
+            prepo.insert_template_detection(self.conn, row)
+        self.conn.commit()
+        return _detection_summary(row)
 
     def classify_only(self, targets: list[Target], opts: Options) -> Report:
         run_id = self._start_run("classify", targets, opts, ["classify"])
@@ -1158,6 +1358,21 @@ class Pipeline:
                 prepo.insert_match_proposal(self.conn, p)
         self.conn.commit()
         return out
+
+
+def _detection_summary(row: dict) -> dict:
+    proposal = row.get("proposal") or {}
+    pages = row.get("pages") or []
+    return {
+        "detection_id": row["detection_id"],
+        "status": row["status"],
+        "conformance": float(row["conformance"]) if row.get("conformance") is not None else None,
+        "template_name": proposal.get("name"),
+        "confidence": proposal.get("confidence"),
+        "deviating": [p["page_id"] for p in pages if p["state"] == "deviates"],
+        "unchecked": [p["page_id"] for p in pages if p["state"] == "unchecked"],
+        "issues": len(row.get("issues") or []),
+    }
 
 
 def load_registry_for(settings: ConfexSettings) -> Registry:

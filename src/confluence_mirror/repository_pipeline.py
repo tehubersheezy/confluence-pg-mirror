@@ -40,6 +40,12 @@ _JSON = frozenset(
         "record_keys",
         "evidence",
         "excluded",
+        "model",
+        "children",
+        "sample",
+        "proposal",
+        "pages",
+        "check_attempt_ids",
     }
 )
 
@@ -356,3 +362,74 @@ def insert_export(conn, row: dict, revision_ids: list[str]) -> None:
             "INSERT INTO review.export_items (export_id, revision_id) VALUES (%s, %s)",
             (row["export_id"], rid),
         )
+
+
+# -- template detection ----------------------------------------------------------------------
+
+
+def template_candidates(
+    conn, *, space_id: int | None, root_id: int | None, min_children: int
+) -> list[dict]:
+    """Parent pages in scope with at least ``min_children`` children, all of them leaves.
+
+    A root scope covers the root and all its descendants. Each candidate lists its
+    children in sibling order, with whether a body is stored for their current version.
+    """
+    cur = conn.execute(
+        "WITH scope AS ("
+        "  SELECT p.page_id, p.title, p.space_id FROM source.pages p WHERE NOT p.is_deleted "
+        "  AND ((%(space)s::bigint IS NOT NULL AND p.space_id = %(space)s) "
+        "    OR (%(root)s::bigint IS NOT NULL "
+        "        AND (p.page_id = %(root)s OR %(root)s = ANY(p.ancestor_ids))))"
+        "), kids AS ("
+        "  SELECT c.parent_id, c.page_id, c.title, c.current_version, c.position, "
+        "    EXISTS (SELECT 1 FROM source.pages g "
+        "            WHERE g.parent_id = c.page_id AND NOT g.is_deleted) AS has_children, "
+        "    EXISTS (SELECT 1 FROM source.page_content pc WHERE pc.page_id = c.page_id "
+        "            AND pc.version_number = c.current_version) AS has_content "
+        "  FROM source.pages c WHERE NOT c.is_deleted "
+        "  AND c.parent_id IN (SELECT page_id FROM scope)"
+        ") SELECT s.page_id, s.title, sp.space_key, "
+        "  json_agg(json_build_object('page_id', k.page_id, 'title', k.title, "
+        "    'version_number', k.current_version, 'has_content', k.has_content) "
+        "    ORDER BY k.position NULLS LAST, lower(k.title), k.page_id) AS children "
+        "FROM scope s JOIN kids k ON k.parent_id = s.page_id "
+        "JOIN source.spaces sp ON sp.space_id = s.space_id "
+        "GROUP BY s.page_id, s.title, sp.space_key "
+        "HAVING count(*) >= %(min)s AND NOT bool_or(k.has_children) "
+        "ORDER BY s.page_id",
+        {"space": space_id, "root": root_id, "min": min_children},
+    )
+    return _dicts(cur)
+
+
+def insert_template_detection(conn, row: dict) -> bool:
+    return _ins(conn, "pipeline.template_detections", row, "detection_id") == 1
+
+
+def get_template_detection(conn, detection_id: str) -> dict | None:
+    return _one_dict(
+        conn.execute(
+            "SELECT * FROM pipeline.template_detections WHERE detection_id = %s",
+            (detection_id,),
+        )
+    )
+
+
+def template_detections(
+    conn, *, space_key: str | None, parent_page_id: int | None, limit: int
+) -> list[dict]:
+    """Latest detection per parent page, newest first."""
+    return _dicts(
+        conn.execute(
+            "SELECT * FROM (SELECT DISTINCT ON (parent_page_id) detection_id, parent_page_id, "
+            "space_key, status, conformance, jsonb_array_length(children) AS child_count, "
+            "proposal->>'name' AS template_name, created_at "
+            "FROM pipeline.template_detections "
+            "WHERE (%(s)s::text IS NULL OR space_key = %(s)s) "
+            "AND (%(p)s::bigint IS NULL OR parent_page_id = %(p)s) "
+            "ORDER BY parent_page_id, created_at DESC) d "
+            "ORDER BY created_at DESC LIMIT %(n)s",
+            {"s": space_key, "p": parent_page_id, "n": limit},
+        )
+    )
