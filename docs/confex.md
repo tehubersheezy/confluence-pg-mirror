@@ -45,6 +45,9 @@ confex sync --page 12345 --representations storage,export_view
 confex sync --root 12345              # a page tree in bulk; --reconcile re-fetches it all
 confex sync --cql 'label = "hosts"'
 confex parse --page 12345 && confex align --page 12345
+confex templates detect --space ITOPS --dry-run   # template families, no model calls
+confex templates detect --space ITOPS             # model proposes and checks templates
+confex templates show 12345                       # latest detection for a parent page
 confex pages outline 12345 --representation storage --tables --macros
 confex tables show 12345:t02 --representation storage --view grid
 confex tables show 12345:t02 --representation storage --view cell --cell R3C1
@@ -66,6 +69,35 @@ confex runs request attempt_<id>                  # the request body actually se
 
 `run` never approves candidates, writes export files or publishes anything.
 
+## Template detection
+
+Pages under one parent are often written from one template. `confex templates detect`
+finds those families and lets the model decide whether they really share a template.
+
+1. **Candidates (code).** A candidate is a parent page, in the space or page tree given,
+   with at least `--min-children` (default 2) children, *none of which has children of its
+   own*. A parent with even one child that is itself a parent is not a candidate. The
+   children need stored bodies (sync the tree first).
+2. **Propose (model).** The model sees redacted structural summaries of up to `--sample`
+   (default 8) children, spread evenly over the family: title, headings, top-level tables
+   (header cells or key column, size, two sample rows) and macro names. It answers whether
+   they follow one template and, if so, describes it: sections, tables, and for each
+   column a header, a field name and a type.
+3. **Check (model).** The model checks *every* child against that template, ten pages per
+   request, and says page by page whether it conforms and what is missing or unexpected.
+4. **Verdict (code).** `template` when at least 80% of the checked children conform,
+   `mixed` from 50%, otherwise `no_template` (a disagreement between proposer and checker
+   when the proposer saw a template). Children the checker did not answer for are
+   `unchecked`, never counted as conforming. Answers about pages outside the batch,
+   duplicate answers and renamed fields are recorded as issues.
+
+A detection is stored immutably, keyed by its inputs (children and versions, sample,
+model, prompt and detector versions), so re-running on unchanged pages reuses it without
+model calls; `--force` asks again. `--dry-run` lists the candidates with estimated
+requests and tokens and sends nothing. Like every model call, detection needs approved
+egress (`[privacy]`), stays within `[budgets]`, and retains each request in
+`pipeline.attempts` (stages `template_propose`, `template_check`).
+
 ## Pipeline and safety model
 
 | Stage | What runs | Model? | Writes |
@@ -74,6 +106,7 @@ confex runs request attempt_<id>                  # the request body actually se
 | `reextract` | mirror extractor over stored bodies, offline | no | `extracted.page_macros`, `macro_extractions`, `page_tables`, `page_links` |
 | `parse` | structural parser | no | `extracted.parse_artifacts`, `table_occurrences`, `search_blocks` |
 | `align` | correspondence | no | `extracted.table_correspondence` |
+| `templates detect` | candidate families in code; model proposes a template, then checks every child | yes | `pipeline.template_detections`, `pipeline.attempts` |
 | `classify` | template routing; model only if allowed | optional | `pipeline.classifications` |
 | plan | record-group units, redacted payloads | no | `pipeline.units` |
 | `extract` | rules, or Claude | rules: no | `pipeline.attempts`, `candidate_revisions` |
@@ -142,6 +175,7 @@ capability, `PAYLOAD_NOT_READY`) · `5` ambiguous selector · `6` internal/execu
 | Table correspondence | `extracted.table_correspondence`; decisions in `review.correspondence_decisions` |
 | Runs, items, attempts, leases | `pipeline.runs`, `pipeline.run_items`, `pipeline.attempts` |
 | Classifications, units | `pipeline.classifications`, `pipeline.units` |
+| Page-template detections | `pipeline.template_detections` (proposal, per-child checks, verdict) |
 | Candidate revisions, facts, relationships, evidence | `pipeline.candidate_revisions` (record JSONB) |
 | Validation results | `pipeline.validation_results` |
 | Entity reconciliation | `pipeline.entity_match_proposals` (proposals only; nothing is merged) |
@@ -149,8 +183,9 @@ capability, `PAYLOAD_NOT_READY`) · `5` ambiguous selector · `6` internal/execu
 | Export manifests and items | `review.exports`, `review.export_items` |
 | Source instances | single instance today (`default`); IDs already include the namespace |
 
-All of these come from additive migrations 0004–0007; besides adding tables, 0005 widens
-one CHECK (`sync.sync_runs.mode` gains `pages` and `metadata`). `confex db migrate` is the
+All of these come from additive migrations 0004–0008. Besides adding tables, 0005 widens
+one CHECK (`sync.sync_runs.mode` gains `pages` and `metadata`) and 0008 another
+(`pipeline.attempts.stage` gains `template_propose` and `template_check`). `confex db migrate` is the
 only schema-changing command. Every other command fails with `SCHEMA_INCOMPATIBLE`
 (exit 4) on an older schema.
 

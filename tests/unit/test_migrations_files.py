@@ -37,6 +37,7 @@ ADDITIONS = {
             "candidate_revisions",
             "validation_results",
             "entity_match_proposals",
+            "template_detections",
         )
     },
     "review_events": "review",

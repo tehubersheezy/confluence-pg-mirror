@@ -64,7 +64,7 @@ rebuilt from `source` offline (`confex reextract`).
 | | `parse_artifacts` | `confex` structural parses: document model per body capture (JSONB) |
 | | `table_occurrences` | `confex` table index: geometry status, nesting, heading path |
 | | `search_blocks`, `table_correspondence` | `confex` text projection; cross-representation table matches |
-| `pipeline` | `runs`, `run_items`, `attempts`, `classifications`, `units`, `candidate_revisions`, `validation_results`, `entity_match_proposals` | `confex` extraction runs and immutable candidates |
+| `pipeline` | `runs`, `run_items`, `attempts`, `classifications`, `units`, `candidate_revisions`, `validation_results`, `entity_match_proposals`, `template_detections` | `confex` extraction runs, immutable candidates, and model-detected page templates |
 | `review` | `review_events`, `exports`, `export_items`, `correspondence_decisions` | append-only human decisions and export audit |
 | `sync` | `sync_runs` | one row per run: mode, status, counters, per-page errors |
 
@@ -171,6 +171,8 @@ confex pages outline 12345 --representation storage --tables --macros
 confex tables show 12345:t02 --representation storage --view grid
 confex tables show 12345:t02 --representation storage --view cell --cell R3C1
 
+confex templates detect --space DEMO --dry-run # parents whose children are all leaves
+confex templates detect --space DEMO           # model: do the children share a template?
 confex extract --page 12345 --plan-only        # no writes, no model calls
 confex extract --page 12345                    # deterministic rules where a template matches
 confex review queue --space DEMO

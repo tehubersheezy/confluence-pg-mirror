@@ -31,7 +31,8 @@ confex/ (CLI) ──► inspection.py ─┬─► repository.py           (mirr
               ├──► review.py ─────┘
               └──► live.py ──► client.ConfluenceClient       (--data-source live; never persists)
 structure/   (pure: body → document artifact, table geometry, IDs)
-extraction/  (pure: registry, classify, units, payload, rules, candidates, validation, privacy)
+extraction/  (pure: registry, classify, units, payload, rules, candidates, validation, privacy,
+              templates: page-template summaries, requests and verdicts)
 extraction/provider.py  (the only module that talks to a model; imports the SDK lazily)
 db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 ```
