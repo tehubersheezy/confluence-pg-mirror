@@ -16,7 +16,6 @@ from confluence_mirror.extraction.registry import Profile
 from confluence_mirror.structure.ids import digest, opaque_id
 
 PLANNER_VERSION = "units.1"
-NON_DATA_ROLES = {"header", "repeated_header", "section", "total", "blank"}
 
 
 def _record_groups(layout: Layout, rows: list[int]) -> list[list[int]]:

@@ -6,8 +6,9 @@ Global options go before the subcommand::
     confex --format json tables show 12345:t02 --representation storage --view grid
 
 Mirror commands open the database read-only and make no network calls. ``db migrate`` is
-the only schema change, ``sync`` the only writer of source captures, and every other
-writing command only adds derived, immutable artifacts or append-only events.
+the only schema change, ``sync`` the only writer of source captures, and ``reextract``
+rebuilds the mirror's own ``extracted.*`` rows. Every other writing command only adds
+derived, immutable artifacts or append-only events.
 """
 
 from __future__ import annotations

@@ -16,7 +16,10 @@ from confluence_mirror.structure.ids import digest
 
 
 def register(sub: argparse._SubParsersAction) -> None:
-    rg = group(sub, "runs", "pipeline runs, items and attempts")
+    rg = group(sub, "runs", "pipeline runs, items and attempts; mirror sync runs")
+    rs = leaf(rg, "runs.sync", "recent mirror sync runs (sync.sync_runs)")
+    rs.add_argument("--space", metavar="KEY")
+    rs.add_argument("--limit", type=positive, default=20)
     rl = leaf(rg, "runs.list")
     rl.add_argument("--limit", type=positive, default=20)
     leaf(rg, "runs.show").add_argument("run_id")
@@ -48,6 +51,30 @@ def _get(conn, run_id: str) -> dict:
 )
 def runs_list(args, ctx: Context) -> Result:
     return Result(prepo.list_runs(ctx.conn(), args.limit))
+
+
+@command(
+    "runs.sync",
+    collection=True,
+    plain=lambda d, a: table(
+        ["run", "space", "mode", "status", "started_at", "fetched", "failed", "errors"],
+        [
+            [
+                r["sync_run_id"],
+                r["space_key"],
+                r["mode"],
+                r["status"],
+                r["started_at"],
+                r["pages_fetched"],
+                r["pages_failed"],
+                r["error_count"],
+            ]
+            for r in d
+        ],
+    ),
+)
+def runs_sync(args, ctx: Context) -> Result:
+    return Result(repo.recent_runs(ctx.conn(), args.space, args.limit))
 
 
 def _plain_run(data, args):

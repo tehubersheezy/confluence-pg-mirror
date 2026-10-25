@@ -25,7 +25,7 @@ use_system_truststore = false
 dsn = "postgresql:///confluence_mirror"
 
 [sync]
-# Spaces synced by `confluence-mirror sync --all`.
+# Spaces synced by `confex sync --all`.
 spaces = ["DEMO"]
 # Content types to mirror: "page" and optionally "blogpost".
 content_types = ["page"]

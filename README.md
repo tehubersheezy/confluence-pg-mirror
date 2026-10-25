@@ -5,8 +5,11 @@ read-only, one space at a time. You get page hierarchy, every body representatio
 properties, attachments, and restrictions. On top of that come structured extractions of
 macros, tables, and page-to-page links, each traceable to the exact markup it came from.
 
-It runs on a locked-down work Mac: no Docker and no administrator rights. You need
-PostgreSQL, Python ≥ 3.11 and a personal access token (PAT).
+Everything goes through one command, `confex`: database setup, sync, structural
+inspection of pages and tables, and evidence-backed extraction with human review.
+
+It runs on a locked-down work Mac: no Docker, no conda and no administrator rights. You
+need PostgreSQL, Python ≥ 3.11 and a personal access token (PAT).
 
 ## What it does
 
@@ -41,7 +44,7 @@ PostgreSQL, Python ≥ 3.11 and a personal access token (PAT).
 ## Database layout
 
 Source data and derived data live in separate schemas. Everything in `extracted` can be
-rebuilt from `source` offline (`confluence-mirror extract`).
+rebuilt from `source` offline (`confex reextract`).
 
 | Schema | Table | Contents |
 |---|---|---|
@@ -87,19 +90,15 @@ uv python install 3.13
 
 Pick whichever your machine allows:
 
-- **Postgres.app.** If it is already installed (or you can install apps), start a server
-  from the app and add its tools to your `PATH`:
-  `export PATH="/Applications/Postgres.app/Contents/Versions/latest/bin:$PATH"`.
-  Postgres.app normally lives in `/Applications`. If you can't write there, use the next
-  option.
-- **User-space binaries** from conda-forge via
-  [micromamba](https://mamba.readthedocs.io/), entirely under your home directory:
-
-  ```bash
-  "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
-  micromamba create -y -n pg -c conda-forge postgresql=16
-  micromamba activate pg
-  ```
+- **[Postgres.app](https://postgresapp.com/).** Use it from `/Applications` if it is
+  already there. Otherwise drag it from the disk image into `~/Applications`, which needs
+  no admin rights (supported since Postgres.app 2.6). Then put its tools on your `PATH`:
+  `export PATH="$HOME/Applications/Postgres.app/Contents/Versions/latest/bin:$PATH"`
+  (or `/Applications/...`).
+- **The binaries zip** from the PostgreSQL macOS download page
+  ([postgresql.org/download/macosx](https://www.postgresql.org/download/macosx/), "zip
+  archive of the binaries"). Unzip it under your home directory and add its `bin` to `PATH`.
+- **Already installed**: any `initdb`/`pg_ctl` on your `PATH` (PostgreSQL 14 or newer).
 
 Then create a private cluster and database. It is reachable only from your machine:
 
@@ -142,26 +141,28 @@ chmod 600 .env
 ### 5. Run
 
 ```bash
-confluence-mirror db migrate             # create / upgrade the schema
-confluence-mirror check                  # validates config + a read-only API call
-confluence-mirror sync --space DEMO      # first run is a full import
-confluence-mirror sync --space DEMO      # later runs are incremental
-confluence-mirror sync --all             # every space in [sync].spaces
-confluence-mirror sync --space DEMO --full
-confluence-mirror sync --root 12345      # one page tree (new or changed pages only)
-confluence-mirror sync --cql 'space = DEMO and label = "runbook"'
-confluence-mirror sync --page 12345      # named pages, always re-fetched
-confluence-mirror runs --space DEMO      # recent sync runs as JSON
-confluence-mirror extract --space DEMO   # rebuild extracted.* offline
+confex db migrate                     # create / upgrade the schema (the only schema change)
+confex doctor --check-db --check-confluence   # config, schema and a read-only API call
+confex sync --space DEMO              # first run is a full import, later runs incremental
+confex sync --all                     # every space in [sync].spaces (for launchd/cron)
+confex sync --space DEMO --reconcile  # re-fetch every page
+confex sync --root 12345              # one page tree (new or changed pages only)
+confex sync --cql 'space = DEMO and label = "runbook"'
+confex sync --page 12345              # named pages, always re-fetched
+confex runs sync --space DEMO         # recent sync runs
+confex reextract --space DEMO         # rebuild extracted.* offline
 ```
 
-Exit codes: `0` success, `1` configuration error, `2` partial (some pages failed; details in
-`sync.sync_runs.errors`), `3` failure, `4` authentication failure.
+Exit codes: `0` success, `2` usage or configuration error, `4` schema not migrated, `6`
+source or internal error, `8` authentication denied, `9` partial (some pages or spaces
+failed; details in `sync.sync_runs.errors`). The full list is in
+[docs/confex.md](docs/confex.md#exit-codes). Add `--format json` (before the subcommand) for
+machine-readable output.
 
-### 6. Explore, inspect and extract (`confex`)
+### 6. Explore, inspect and extract
 
-`confex` works on the mirror. Navigation and inspection open the database read-only and
-make no network calls. Global options go before the subcommand.
+Navigation and inspection open the database read-only and make no network calls. Global
+options go before the subcommand.
 
 ```bash
 confex spaces tree DEMO --depth 3 --counts
@@ -175,6 +176,7 @@ confex extract --page 12345                    # deterministic rules where a tem
 confex review queue --space DEMO
 confex review approve rev_<id> --reason "Checked source cells"
 confex export --space DEMO --approved-only --output ./approved
+confex run --root 12345                        # sync → parse → align → extract → validate
 ```
 
 Merged cells appear as `covered:cN` slots that point at one physical cell. Nested tables
@@ -187,11 +189,11 @@ approval recorded in `[privacy]` (see `config/config.example.toml`). Until then 
 leaves the machine, and rule-based extraction still works. Every candidate needs human
 approval before export.
 
-See [docs/confex.md](docs/confex.md) for the full command set, safety model, exit codes and
-measured results.
+See [docs/confex.md](docs/confex.md) for the full command set, safety model and measured
+results.
 
-To schedule a sync, use `launchd` (user agents in `~/Library/LaunchAgents` need no admin) or
-`cron`.
+To schedule a sync, run `confex sync --all` from `launchd` (user agents in
+`~/Library/LaunchAgents` need no admin) or `cron`.
 
 ## How incremental sync works
 
@@ -211,8 +213,8 @@ and extraction rows are per version. The sync cursor only advances on a fully su
 run. Failed pages keep their old stored version, so the next run retries them automatically.
 
 Scoped syncs (`--root`, `--cql`, `--page`) run in mode `pages`: they list only the selection,
-fetch what is new or changed (`--full` re-fetches it all), and never mark pages deleted or
-advance the space cursor.
+fetch what is new or changed (`--reconcile` re-fetches it all), and never mark pages deleted
+or advance the space cursor.
 
 ### Request budget and rate limits
 
@@ -231,7 +233,7 @@ retried after `Retry-After`.
 
 Restrictions and content properties change without a version bump. Incremental runs refresh
 them only for changed pages, unless `refresh_unchanged_metadata = true` (slower). A
-`--full` run always refreshes everything.
+`--reconcile` run always refreshes everything.
 
 ## Example queries
 
@@ -264,7 +266,8 @@ WHERE extraction_type = 'code' GROUP BY 1;
 - TLS verification is always on. The client refuses pagination links pointing at another
   host, so the token is only ever sent to the configured instance.
 - Storage XML is parsed with entity resolution and network access disabled (no XXE).
-- Mirrored content stays in your local database. Nothing is sent to any other service.
+- Mirrored content stays in your local database. Nothing is sent to any other service
+  unless model extraction is explicitly approved in `[privacy]`.
 
 ## Development
 

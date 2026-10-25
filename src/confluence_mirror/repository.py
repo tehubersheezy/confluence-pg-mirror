@@ -128,12 +128,6 @@ def finish_run(
     conn.execute(query, [status, Jsonb(errors), Jsonb(stats), *values, run_id])
 
 
-def run_started_at(conn: psycopg.Connection, run_id: int):
-    return conn.execute(
-        "SELECT started_at FROM sync.sync_runs WHERE sync_run_id = %s", (run_id,)
-    ).fetchone()[0]
-
-
 def recent_runs(conn: psycopg.Connection, space_key: str | None, limit: int) -> list[dict]:
     cur = conn.execute(
         "SELECT sync_run_id, space_key, mode, status, started_at, finished_at, pages_listed, "
