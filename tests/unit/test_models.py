@@ -4,7 +4,7 @@ from confluence_mirror import models
 from tests.fake_confluence import FakeConfluence, demo_space
 
 
-def fake_content(expand="body.storage,restrictions"):
+def fake_content(expand="body.storage,body.view,body.export_view,restrictions"):
     fake = FakeConfluence()
     demo_space(fake, "<p>root</p>")
     return fake, fake.content_json(fake.pages[1003], expand)

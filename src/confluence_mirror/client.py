@@ -50,6 +50,18 @@ CONTENT_EXPAND_FULL = ",".join(
     ]
 )
 
+_BODY_EXPANDS = {"storage": "body.storage", "view": "body.view", "export_view": "body.export_view"}
+
+
+def content_expand(representations: tuple[str, ...] | list[str]) -> str:
+    """CONTENT_EXPAND_FULL with only the requested body representations."""
+    wanted = {_BODY_EXPANDS[r] for r in representations}
+    return ",".join(
+        part
+        for part in CONTENT_EXPAND_FULL.split(",")
+        if not part.startswith("body.") or part in wanted
+    )
+
 
 class ConfluenceError(Exception):
     def __init__(self, message: str, status: int | None = None):
@@ -279,6 +291,18 @@ class ConfluenceClient:
         if status:
             params["status"] = status
         return self.get_json(f"/rest/api/content/{content_id}", params)
+
+    def list_spaces(self, space_type: str | None = None) -> Iterator[dict]:
+        params: dict[str, Any] = {"expand": "description.plain,homepage"}
+        if space_type:
+            params["type"] = space_type
+        return self.paginate("/rest/api/space", params)
+
+    def child_pages(self, content_id: int | str) -> Iterator[dict]:
+        return self.paginate(
+            f"/rest/api/content/{content_id}/child/page",
+            {"expand": "version,extensions.position"},
+        )
 
     def labels(self, content_id: int | str) -> Iterator[dict]:
         return self.paginate(f"/rest/api/content/{content_id}/label")

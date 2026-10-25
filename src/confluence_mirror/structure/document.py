@@ -86,6 +86,31 @@ _SKIP_TAGS = frozenset(
     }
 )
 _CONTEXT_TAGS = frozenset({"p", "ul", "ol", "div", "blockquote", "pre"})
+# Flow blocks recorded as text nodes, so a page can be read back in source order.
+_FLOW_KINDS = {
+    "p": "paragraph",
+    "li": "list_item",
+    "pre": "code",
+    "blockquote": "quote",
+    "div": "paragraph",
+}
+_STRUCTURAL = frozenset(
+    {
+        "table",
+        "ul",
+        "ol",
+        "p",
+        "div",
+        "pre",
+        "blockquote",
+        "li",
+        *_HEADINGS,
+        *_MACROS,
+        "ac:layout",
+        "ac:layout-section",
+        "ac:layout-cell",
+    }
+)
 _WS_RE = re.compile(r"\s+")
 
 
@@ -304,6 +329,8 @@ class _Builder:
         self.table_ids: dict[etree._Element, str] = {}
         self.ordinals: dict[str, int] = {}
         self.diagnostics: list[dict] = []
+        # Content before the first heading is addressable as its own section.
+        self.preamble_id = opaque_id("sec", artifact_id, "preamble")
 
     def block(self, kind: str, el: etree._Element, text: str, suffix: str = "") -> str:
         path = element_path(el) + suffix
@@ -317,12 +344,14 @@ class _Builder:
         return block_id
 
     def node(self, kind: str, node_id: str, el: etree._Element, scope: _Scope, **extra) -> dict:
+        path = scope.path()
         node = {
             "id": node_id,
             "kind": kind,
             "order": len(self.nodes),
             "container_id": scope.container_id,
             "cell_id": scope.cell_id,
+            "section_id": path[-1]["id"] if path else self.preamble_id,
             "element_path": element_path(el),
             **extra,
         }
@@ -362,9 +391,17 @@ class _Builder:
                 while scope.stack and scope.stack[-1]["level"] >= level:
                     scope.stack.pop()
                 ref = {"id": sec_id, "level": level, "text": normalize(text), "scope": scope.kind}
-                self.node("heading", sec_id, child, scope, level=level, text=ref["text"])
-                self.blocks[block_id]["section_id"] = sec_id
                 scope.stack.append(ref)
+                self.node(
+                    "heading",
+                    sec_id,
+                    child,
+                    scope,
+                    level=level,
+                    text=ref["text"],
+                    block_id=block_id,
+                )
+                self.blocks[block_id]["section_id"] = sec_id
             elif name == "table" and child in self.table_ids:
                 self.table(child, scope)
             elif name in _MACROS:
@@ -380,8 +417,26 @@ class _Builder:
                 self.node("layout_cell", cell_node_id, child, scope)
                 container = {"kind": "layout_cell", "id": cell_node_id}
                 self.walk(child, scope.child("layout_cell", container))
+            elif name in _FLOW_KINDS:
+                self.flow(child, name, scope)
             elif name != "ac:plain-text-body":
                 self.walk(child, scope)
+
+    def flow(self, el: etree._Element, name: str, scope: _Scope) -> None:
+        nested = any(
+            isinstance(d.tag, str) and qname(d) in _STRUCTURAL for d in el.iterdescendants()
+        )
+        if not nested:
+            text = evidence_text(el)
+            if text:
+                block_id = self.block(_FLOW_KINDS[name], el, text)
+                self.node(_FLOW_KINDS[name], block_id, el, scope, block_id=block_id, text=text)
+            return
+        lead = _WS_RE.sub(" ", el.text or "").strip()
+        if lead:  # text before the first nested block, e.g. a list item owning a sub-list
+            block_id = self.block(_FLOW_KINDS[name], el, lead, "#lead")
+            self.node(_FLOW_KINDS[name], block_id, el, scope, block_id=block_id, text=lead)
+        self.walk(el, scope)
 
     def table(self, table: etree._Element, scope: _Scope, orphan_parent: str | None = None) -> None:
         table_id = self.table_ids[table]

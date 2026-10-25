@@ -261,8 +261,8 @@ def test_output_file_and_schema_gate(mirror, capsys, tmp_path, conn):
     conn.commit()
     code, env = run(capsys, "spaces", "list")
     assert code == inspection.EXIT_UNAVAILABLE and env["error"]["code"] == "SCHEMA_INCOMPATIBLE"
-    code, env = run(capsys, "--data-source", "live", "spaces", "list")
-    assert code == inspection.EXIT_UNAVAILABLE
+    code, env = run(capsys, "--data-source", "live", "tables", "list")
+    assert code == inspection.EXIT_UNAVAILABLE and env["error"]["code"] == "CAPABILITY_UNAVAILABLE"
 
 
 def test_jsonl_collections(mirror, capsys):

@@ -8,6 +8,7 @@ memory and the result is labeled ``ephemeral_parse`` and never persisted.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ from confluence_mirror.logging_utils import redact
 from confluence_mirror.structure import REPRESENTATIONS, ParseConfig, parse_document
 from confluence_mirror.structure.document import artifact_identity
 from confluence_mirror.structure.grid import project
-from confluence_mirror.structure.ids import DEFAULT_INSTANCE_ID
+from confluence_mirror.structure.ids import DEFAULT_INSTANCE_ID, opaque_id
 
 log = logging.getLogger(__name__)
 
@@ -329,6 +330,18 @@ def _snapshot_content(conn, page_id: int, snapshot: str, config: ParseConfig) ->
             )
             if ident["snapshot_id"] == snapshot:
                 return content, rep
+    for old in repo.superseded_bodies(conn, page_id):
+        rep = old["representation"]
+        ident = artifact_identity(page_id, old["version_number"], rep, old["body"], config=config)
+        if ident["snapshot_id"] == snapshot:
+            bodies = {r: None for r in REPRESENTATIONS} | {rep: old["body"]}
+            return {
+                "page_id": page_id,
+                "version_number": old["version_number"],
+                "bodies": bodies,
+                "fetched_at": old["captured_at"],
+                "superseded": True,
+            }, rep
     raise not_found(
         f"snapshot {snapshot} is not a stored capture of page {page_id}", snapshot_id=snapshot
     )
@@ -813,7 +826,8 @@ def parse_pages(
                     artifact = parse_document(
                         body, page_id=page_id, version=version, representation=rep, config=config
                     )
-                    repo.insert_parse_artifact(conn, artifact)
+                    if repo.insert_parse_artifact(conn, artifact) and rep == "storage":
+                        repo.insert_search_blocks(conn, search_rows(artifact))
                 conn.commit()
                 stats["parsed"] += 1
                 stats["tables"] += len(artifact["tables"])
@@ -834,3 +848,405 @@ def parse_pages(
                 )
                 log.error("parse failed for page %s v%s %s: %s", page_id, version, rep, message)
     return {**stats, "targets": len(targets), "errors": errors[:50]}
+
+
+def search_rows(artifact: dict) -> list[dict]:
+    """Search-projection rows for an artifact: flow text, headings and cell text."""
+    cell_table = {c["cell_id"]: t["table_id"] for t in artifact["tables"] for c in t["cells"]}
+    section_of = {n["block_id"]: n["section_id"] for n in artifact["nodes"] if n.get("block_id")}
+    rows = []
+    for block_id, block in artifact["blocks"].items():
+        if not block["normalized_text"] or block["kind"] in ("caption",):
+            continue
+        cell_id = block.get("cell_id")
+        if block["kind"] != "cell_text" and block_id not in section_of:
+            continue  # context-only blocks duplicate flow nodes
+        rows.append(
+            {
+                "artifact_id": artifact["artifact_id"],
+                "block_id": block_id,
+                "page_id": artifact["page_id"],
+                "version_number": artifact["version_number"],
+                "block_kind": block["kind"],
+                "section_id": section_of.get(block_id),
+                "table_id": cell_table.get(cell_id) if cell_id else None,
+                "cell_id": cell_id,
+                "text": block["normalized_text"],
+            }
+        )
+    return rows
+
+
+# -- page metadata ---------------------------------------------------------------------
+
+
+def page_labels(conn, page_id: int) -> list[dict]:
+    _page(conn, page_id)
+    return repo.page_labels(conn, page_id)
+
+
+def page_properties(conn, page_id: int, key: str | None) -> list[dict]:
+    _page(conn, page_id)
+    rows = repo.page_properties(conn, page_id, key)
+    if key and not rows:
+        raise not_found(f"page {page_id} has no mirrored property {key!r}")
+    return rows
+
+
+def page_attachments(conn, page_id: int, include_deleted: bool) -> dict:
+    _page(conn, page_id)
+    return {
+        "attachments": repo.page_attachments(conn, page_id, include_deleted),
+        "note": "metadata only; attachment bodies are not downloaded or parsed",
+    }
+
+
+def page_versions(conn, page_id: int) -> dict:
+    page = _page(conn, page_id)
+    return {
+        "current_version": page["current_version"],
+        "versions": repo.page_version_rows(conn, page_id),
+        "note": "versions without body_stored are known from metadata only",
+    }
+
+
+def page_macros(conn, page_id: int, name: str | None, version: int | None) -> dict:
+    page = _page(conn, page_id)
+    v = version or page["current_version"]
+    return {"version_number": v, "macros": repo.page_macro_rows(conn, page_id, v, name)}
+
+
+def page_links(conn, page_id: int, direction: str) -> dict:
+    page = _page(conn, page_id)
+    out: dict[str, Any] = {"direction": direction}
+    if direction in ("out", "both"):
+        links = repo.outbound_links(conn, page_id, page["current_version"])
+        for link in links:
+            if link["link_type"] in ("page", "blogpost", "include"):
+                link["resolution"] = "resolved" if link["target_page_id"] else "unresolved"
+            else:
+                link["resolution"] = "not_applicable"
+        out["outbound"] = links
+    if direction in ("in", "both"):
+        out["inbound"] = repo.inbound_links(conn, page_id)
+        out["inbound_coverage"] = (
+            "links discovered in the current version of mirrored pages only; "
+            "not a complete backlink index"
+        )
+    return out
+
+
+# -- reading -------------------------------------------------------------------------------
+
+
+def _section_nodes(artifact: dict, section_id: str | None) -> list[dict]:
+    """Document-flow nodes of the whole page or of one section (with its subsections)."""
+    nodes = [n for n in artifact["nodes"] if n["cell_id"] is None]
+    if section_id is None:
+        return nodes
+    if section_id == _preamble_id(artifact):
+        out = []
+        for n in nodes:
+            if n["kind"] == "heading" and n["container_id"] is None:
+                break
+            out.append(n)
+        return out
+    start = next((i for i, n in enumerate(nodes) if n["id"] == section_id), None)
+    if start is None or nodes[start]["kind"] != "heading":
+        raise not_found(f"section {section_id} is not in artifact {artifact['artifact_id']}")
+    head = nodes[start]
+    out = [head]
+    for n in nodes[start + 1 :]:
+        if (
+            n["kind"] == "heading"
+            and n["container_id"] == head["container_id"]
+            and n["level"] <= head["level"]
+        ):
+            break
+        out.append(n)
+    return out
+
+
+def read_text(resolved: Resolved, section_id: str | None) -> dict:
+    """Page text in source order; tables and macros appear as references, not prose."""
+    artifact = resolved.artifact
+    tables = {t["table_id"]: t for t in artifact["tables"]}
+    items = []
+    for n in _section_nodes(artifact, section_id):
+        item: dict[str, Any] = {"kind": n["kind"], "id": n["id"], "section_id": n["section_id"]}
+        if n["kind"] == "heading":
+            item.update(level=n["level"], text=n["text"])
+        elif n["kind"] == "table":
+            t = tables[n["id"]]
+            item.update(
+                selector=f"{artifact['page_id']}:t{t['ordinal']:02d}",
+                rows=t["row_count"],
+                columns=t["column_count"],
+            )
+        elif n["kind"] in ("macro", "layout_cell"):
+            item["name"] = n.get("name")
+        else:
+            item["text"] = artifact["blocks"][n["block_id"]]["evidence_text"]
+            item["block_id"] = n["block_id"]
+        items.append(item)
+    return {
+        "representation": artifact["representation"],
+        "representation_reason": resolved.reason,
+        "parse_mode": resolved.parse_mode,
+        "section_id": section_id,
+        "preamble_section_id": _preamble_id(artifact),
+        "blocks": items,
+    }
+
+
+def _preamble_id(artifact: dict) -> str:
+    return opaque_id("sec", artifact["artifact_id"], "preamble")
+
+
+def read_raw(conn, page_id: int, representation: str, version: int | None) -> dict:
+    content = _content(conn, page_id, version)
+    rep = representation
+    if rep == "auto":
+        rep = next((r for r in AUTO_PREFERENCE if content["bodies"][r] is not None), None)
+    body = content["bodies"].get(rep) if rep else None
+    if body is None:
+        raise ConfexError(
+            "REPRESENTATION_UNAVAILABLE",
+            f"representation {representation} is not stored for page {page_id}",
+            EXIT_UNAVAILABLE,
+        )
+    return {
+        "representation": rep,
+        "version_number": content["version_number"],
+        "kind": "stored_body_value",
+        "note": "the decoded REST body value as stored; not the HTTP transfer bytes",
+        "body": body,
+    }
+
+
+# -- diff -----------------------------------------------------------------------------------
+
+
+def _capture(
+    conn,
+    page_id: int,
+    snapshot: str | None,
+    version: int | None,
+    representation: str,
+    config: ParseConfig,
+) -> Resolved:
+    if snapshot:
+        content, rep = _snapshot_content(conn, page_id, snapshot, config)
+        artifact, mode = _artifact_for(
+            conn, page_id, content["version_number"], rep, content["bodies"][rep], config
+        )
+        return Resolved(artifact, mode, "snapshot", content["fetched_at"])
+    rep = "storage" if representation == "auto" else representation
+    return page_artifact(conn, page_id, rep, version, config)
+
+
+def _table_signature(t: dict) -> tuple:
+    return (tuple(h["text"] for h in t["heading_path"]), t["column_count"], t["depth"])
+
+
+def _table_texts(artifact: dict, t: dict) -> list[list[str]]:
+    by_id = {c["cell_id"]: c for c in t["cells"]}
+    grid = table_grid(t)
+    return [
+        [
+            by_id[s["cells"][0]]["direct_text"] if s["kind"] == "origin" else f"<{s['kind']}>"
+            for s in row
+        ]
+        for row in grid
+    ]
+
+
+def diff_pages(
+    conn,
+    page_id: int,
+    *,
+    from_snapshot: str | None = None,
+    to_snapshot: str | None = None,
+    from_version: int | None = None,
+    to_version: int | None = None,
+    representation: str = "storage",
+    config: ParseConfig | None = None,
+) -> dict:
+    config = config or ParseConfig()
+    if not (from_snapshot or from_version) or not (to_snapshot or to_version):
+        raise ConfexError(
+            "MISSING_ARGUMENT",
+            "give --from-snapshot/--from-version and --to-snapshot/--to-version",
+            EXIT_USAGE,
+        )
+    a = _capture(conn, page_id, from_snapshot, from_version, representation, config).artifact
+    b = _capture(conn, page_id, to_snapshot, to_version, representation, config).artifact
+    if a["representation"] != b["representation"]:
+        raise ConfexError(
+            "ARGUMENT_CONFLICT", "both captures must use the same representation", EXIT_USAGE
+        )
+
+    meta_a = repo.version_metadata(conn, page_id, a["version_number"]) or {}
+    meta_b = repo.version_metadata(conn, page_id, b["version_number"]) or {}
+    metadata = {
+        k: {"from": meta_a.get(k), "to": meta_b.get(k)}
+        for k in ("title", "parent_id")
+        if meta_a.get(k) != meta_b.get(k)
+    }
+
+    def heads(art: dict) -> list[str]:
+        return [
+            f"h{n['level']} {n['text']}"
+            for n in art["nodes"]
+            if n["kind"] == "heading" and n["cell_id"] is None
+        ]
+
+    def flow(art: dict) -> list[str]:
+        return [
+            art["blocks"][n["block_id"]]["normalized_text"]
+            for n in art["nodes"]
+            if n.get("block_id") and n["kind"] != "heading" and n["cell_id"] is None
+        ]
+
+    def changes(x: list[str], y: list[str]) -> dict:
+        added, removed = [], []
+        for line in difflib.ndiff(x, y):
+            if line.startswith("+ "):
+                added.append(line[2:])
+            elif line.startswith("- "):
+                removed.append(line[2:])
+        return {"added": added, "removed": removed}
+
+    tables = []
+    unmatched_b = list(b["tables"])
+    for ta in a["tables"]:
+        sig = _table_signature(ta)
+        same = [tb for tb in unmatched_b if _table_signature(tb) == sig]
+        if len(same) == 1:
+            tb = same[0]
+            unmatched_b.remove(tb)
+            ga, gb = _table_texts(a, ta), _table_texts(b, tb)
+            cell_changes = []
+            if (ta["row_count"], ta["column_count"]) == (tb["row_count"], tb["column_count"]):
+                for r, (ra, rb) in enumerate(zip(ga, gb, strict=True), start=1):
+                    for c, (x, y) in enumerate(zip(ra, rb, strict=True), start=1):
+                        if x != y:
+                            cell_changes.append({"coord": f"R{r}C{c}", "from": x, "to": y})
+            tables.append(
+                {
+                    "match": "candidate",
+                    "method": "heading_path+columns+depth",
+                    "from": ta["table_id"],
+                    "to": tb["table_id"],
+                    "dimensions": {
+                        "from": [ta["row_count"], ta["column_count"]],
+                        "to": [tb["row_count"], tb["column_count"]],
+                    },
+                    "cell_changes": cell_changes,
+                }
+            )
+        else:
+            tables.append(
+                {
+                    "match": "ambiguous" if same else "removed_or_changed",
+                    "from": ta["table_id"],
+                    "candidates": [t["table_id"] for t in same],
+                }
+            )
+    tables += [{"match": "added_or_changed", "to": tb["table_id"]} for tb in unmatched_b]
+    return {
+        "from": {
+            "snapshot_id": a["snapshot_id"],
+            "version_number": a["version_number"],
+            "artifact_id": a["artifact_id"],
+        },
+        "to": {
+            "snapshot_id": b["snapshot_id"],
+            "version_number": b["version_number"],
+            "artifact_id": b["artifact_id"],
+        },
+        "representation": a["representation"],
+        "identical_body": a["body_sha256"] == b["body_sha256"],
+        "metadata": metadata,
+        "headings": changes(heads(a), heads(b)),
+        "blocks": changes(flow(a), flow(b)),
+        "tables": tables,
+        "note": "table matches are candidates, never established by ordinal",
+    }
+
+
+# -- search ----------------------------------------------------------------------------------
+
+
+def search(
+    conn,
+    *,
+    space_key: str | None,
+    title: str | None,
+    text: str | None,
+    label: str | None,
+    has_tables: bool,
+    limit: int = 500,
+) -> dict:
+    if not any((title, text, label, has_tables)):
+        raise ConfexError(
+            "MISSING_ARGUMENT", "give --title, --text, --label or --has-tables", EXIT_USAGE
+        )
+    space_id = _space(conn, space_key)["space_id"] if space_key else None
+    pages = repo.search_pages(
+        conn, space_id=space_id, title=title, label=label, has_tables=has_tables, limit=limit
+    )
+    results: dict[int, dict] = {}
+    for p in pages:
+        matches = []
+        if title:
+            matches.append({"field": "title"})
+        if label:
+            matches.append({"field": "label", "value": label})
+        if has_tables:
+            matches.append({"field": "has_tables"})
+        results[p["page_id"]] = {**p, "matches": matches}
+    projection = None
+    if text:
+        ids = list(results) if (title or label or has_tables) else None
+        if ids == []:
+            results = {}
+        else:
+            hits = repo.search_text(conn, text=text, page_ids=ids, space_id=space_id, limit=limit)
+            text_results: dict[int, dict] = {}
+            for h in hits:
+                entry = text_results.setdefault(
+                    h["page_id"],
+                    {
+                        **{k: h[k] for k in ("page_id", "title", "space_key")},
+                        "current_version": h["version_number"],
+                        "matches": list(results.get(h["page_id"], {}).get("matches", [])),
+                    },
+                )
+                entry["matches"].append(
+                    {
+                        "field": "text",
+                        "block_id": h["block_id"],
+                        "block_kind": h["block_kind"],
+                        "section_id": h["section_id"],
+                        "table_id": h["table_id"],
+                        "cell_id": h["cell_id"],
+                        "snippet": _snippet(h["text"], text),
+                    }
+                )
+            results = text_results
+        projection = repo.search_projection_state(conn, space_id)
+    return {
+        "method": "case-insensitive substring over mirror metadata and the parsed-text "
+        "projection; not Confluence CQL ranking or tokenization",
+        "results": sorted(results.values(), key=lambda r: (r["title"].lower(), r["page_id"])),
+        "text_projection": projection,
+    }
+
+
+def _snippet(text: str, needle: str, width: int = 60) -> str:
+    i = text.lower().find(needle.lower())
+    if i < 0:
+        return text[: width * 2]
+    lo, hi = max(i - width, 0), min(i + len(needle) + width, len(text))
+    return ("…" if lo else "") + text[lo:hi] + ("…" if hi < len(text) else "")

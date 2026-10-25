@@ -18,8 +18,10 @@ TABLES = [
     "access_restrictions",
     "sync_runs",
 ]
-# Additive confex tables (0004); the fourteen agreed mirror tables above stay as they are.
-CONFEX_TABLES = ["parse_artifacts", "table_occurrences"]
+# Additive confex tables (0004+); the fourteen agreed mirror tables above stay as they are.
+CONFEX_TABLES = ["parse_artifacts", "table_occurrences", "search_blocks"]
+# Archive of same-version body captures (0005), in the source schema.
+SOURCE_ADDITIONS = ["superseded_bodies"]
 
 
 def test_migrations_are_ordered_and_contiguous():
@@ -30,7 +32,7 @@ def test_migrations_are_ordered_and_contiguous():
 def test_mirror_tables_plus_confex_additions_are_defined():
     sql = "\n".join(m.sql for m in available_migrations())
     created = re.findall(r"CREATE TABLE (\w+)\.(\w+)", sql)
-    assert sorted(name for _, name in created) == sorted(TABLES + CONFEX_TABLES)
+    assert sorted(name for _, name in created) == sorted(TABLES + CONFEX_TABLES + SOURCE_ADDITIONS)
     schemas = {name: schema for schema, name in created}
     assert {
         schemas[t]

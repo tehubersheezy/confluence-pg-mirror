@@ -38,6 +38,8 @@ class SyncSettings:
     incremental_overlap_minutes: int = 1440
     refresh_unchanged_metadata: bool = False
     attachment_dir: str | None = None
+    # Body representations fetched per page; storage is always required.
+    representations: tuple[str, ...] = ("storage", "export_view", "view")
 
 
 @dataclass(frozen=True)
@@ -85,7 +87,11 @@ def _validate_base_url(url: str) -> str:
 
 
 def load_settings(
-    path: Path | None, env: dict[str, str] | None = None, *, require_confluence: bool = True
+    path: Path | None,
+    env: dict[str, str] | None = None,
+    *,
+    require_confluence: bool = True,
+    require_dsn: bool = True,
 ) -> Settings:
     env = os.environ if env is None else env
     data: dict = {}
@@ -127,20 +133,25 @@ def load_settings(
 
     db = data.get("database", {})
     dsn = env.get("CONFLUENCE_MIRROR_DSN") or db.get("dsn") or ""
-    if not dsn:
+    if not dsn and require_dsn:
         raise ConfigError("database.dsn (or CONFLUENCE_MIRROR_DSN) is required")
 
     sync_raw = dict(data.get("sync", {}))
     unknown = set(sync_raw) - set(SyncSettings.__dataclass_fields__)
     if unknown:
         raise ConfigError(f"unknown [sync] keys: {', '.join(sorted(unknown))}")
-    for key in ("spaces", "content_types"):
+    for key in ("spaces", "content_types", "representations"):
         if key in sync_raw:
             sync_raw[key] = tuple(sync_raw[key])
     sync = SyncSettings(**sync_raw)
     bad_types = set(sync.content_types) - {"page", "blogpost"}
     if bad_types:
         raise ConfigError(f"unsupported content_types: {', '.join(sorted(bad_types))}")
+    bad_reps = set(sync.representations) - {"storage", "export_view", "view"}
+    if bad_reps or "storage" not in sync.representations:
+        raise ConfigError(
+            "sync.representations must include storage and only name storage, export_view, view"
+        )
     if not 0 < sync.max_delete_fraction <= 1:
         raise ConfigError("sync.max_delete_fraction must be in (0, 1]")
     return Settings(confluence=confluence, dsn=dsn, sync=sync)
