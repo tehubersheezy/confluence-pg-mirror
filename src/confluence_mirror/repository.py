@@ -33,6 +33,7 @@ _JSON_COLUMNS = frozenset(
         "document",
         "diagnostics",
         "heading_path",
+        "evidence",
     }
 )
 
@@ -1035,3 +1036,83 @@ def search_projection_state(conn, space_id: int | None) -> dict:
         (space_id, space_id),
     ).fetchone()
     return {"pages": row[0], "pages_indexed": row[1], "indexed_at": row[2]}
+
+
+# -- correspondence -------------------------------------------------------------------------
+
+
+def latest_artifacts(conn, page_id: int, version: int) -> dict[str, dict]:
+    """The most recently parsed artifact per representation for one (page, version)."""
+    cur = conn.execute(
+        "SELECT DISTINCT ON (representation) representation, document "
+        "FROM extracted.parse_artifacts WHERE page_id = %s AND version_number = %s "
+        "ORDER BY representation, parsed_at DESC",
+        (page_id, version),
+    )
+    return {rep: doc for rep, doc in cur.fetchall()}
+
+
+def insert_correspondence(conn, rows: list[dict]) -> int:
+    added = 0
+    for row in rows:
+        data = {k: v for k, v in row.items() if k not in ("left_ordinal", "right_ordinal")}
+        cur = conn.execute(
+            sql.SQL(
+                "INSERT INTO extracted.table_correspondence ({c}) VALUES ({v}) "
+                "ON CONFLICT (correspondence_id) DO NOTHING"
+            ).format(
+                c=sql.SQL(", ").join(map(sql.Identifier, data)),
+                v=sql.SQL(", ").join(sql.Placeholder() * len(data)),
+            ),
+            [_adapt(k, v) for k, v in data.items()],
+        )
+        added += cur.rowcount
+    return added
+
+
+def correspondence_rows(conn, page_id: int, version: int, artifact_ids: list[str]) -> list[dict]:
+    cur = conn.execute(
+        "SELECT c.*, d.decision, d.actor AS decided_by, d.reason AS decision_reason, "
+        "d.decided_at FROM extracted.table_correspondence c "
+        "LEFT JOIN LATERAL (SELECT decision, actor, reason, decided_at "
+        "  FROM review.correspondence_decisions x WHERE x.correspondence_id = c.correspondence_id "
+        "  ORDER BY decided_at DESC, decision_id DESC LIMIT 1) d ON true "
+        "WHERE c.page_id = %s AND c.version_number = %s "
+        "AND c.left_artifact_id = ANY(%s) AND c.right_artifact_id = ANY(%s) "
+        "ORDER BY c.left_representation, c.right_representation, c.correspondence_id",
+        (page_id, version, artifact_ids, artifact_ids),
+    )
+    return _dicts(cur)
+
+
+def correspondence_for_table(conn, table_id: str) -> list[dict]:
+    cur = conn.execute(
+        "SELECT c.correspondence_id, c.left_table_id, c.right_table_id, c.left_representation, "
+        "c.right_representation, c.state, c.method, c.evidence, d.decision "
+        "FROM extracted.table_correspondence c "
+        "LEFT JOIN LATERAL (SELECT decision FROM review.correspondence_decisions x "
+        "  WHERE x.correspondence_id = c.correspondence_id "
+        "  ORDER BY decided_at DESC, decision_id DESC LIMIT 1) d ON true "
+        "WHERE c.left_table_id = %s OR c.right_table_id = %s ORDER BY c.correspondence_id",
+        (table_id, table_id),
+    )
+    return _dicts(cur)
+
+
+def get_correspondence(conn, correspondence_id: str) -> dict | None:
+    cur = conn.execute(
+        "SELECT * FROM extracted.table_correspondence WHERE correspondence_id = %s",
+        (correspondence_id,),
+    )
+    return _one_dict(cur)
+
+
+def add_correspondence_decision(
+    conn, correspondence_id: str, decision: str, actor: str, reason: str
+) -> int:
+    row = conn.execute(
+        "INSERT INTO review.correspondence_decisions (correspondence_id, decision, actor, reason) "
+        "VALUES (%s, %s, %s, %s) RETURNING decision_id",
+        (correspondence_id, decision, actor, reason),
+    ).fetchone()
+    return row[0]

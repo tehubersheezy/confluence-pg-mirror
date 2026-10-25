@@ -100,7 +100,7 @@ def pg_dsn():
 
 
 def reset_schema(conn: psycopg.Connection) -> None:
-    for schema in ("extracted", "source", "sync"):
+    for schema in ("pipeline", "review", "extracted", "source", "sync"):
         conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
     conn.commit()
 

@@ -16,6 +16,7 @@ from typing import Any
 
 import psycopg
 
+from confluence_mirror import correspondence as corr
 from confluence_mirror import repository as repo
 from confluence_mirror.logging_utils import redact
 from confluence_mirror.structure import REPRESENTATIONS, ParseConfig, parse_document
@@ -590,7 +591,7 @@ def table_view(
             "row_order_policy": table["row_order_policy"],
             "geometry_status": table["geometry_status"],
             "extraction_eligible": table["extraction_eligible"],
-            "correspondence": {"state": "not_computed"},
+            "correspondence": _table_correspondence(conn, table["table_id"]),
             "artifact_status": a["status"],
             "diagnostics": table["diagnostics"],
         }
@@ -1250,3 +1251,188 @@ def _snippet(text: str, needle: str, width: int = 60) -> str:
         return text[: width * 2]
     lo, hi = max(i - width, 0), min(i + len(needle) + width, len(text))
     return ("…" if lo else "") + text[lo:hi] + ("…" if hi < len(text) else "")
+
+
+# -- correspondence -----------------------------------------------------------------------
+
+
+def _table_correspondence(conn, table_id: str) -> dict:
+    rows = repo.correspondence_for_table(conn, table_id)
+    if not rows:
+        return {"state": "not_computed", "hint": "run `confex align` after `confex parse`"}
+    return {
+        "links": [
+            {
+                "correspondence_id": r["correspondence_id"],
+                "other_table_id": r["right_table_id"]
+                if r["left_table_id"] == table_id
+                else r["left_table_id"],
+                "other_representation": r["right_representation"]
+                if r["left_table_id"] == table_id
+                else r["left_representation"],
+                "state": r["state"],
+                "method": r["method"],
+                "decision": r["decision"],
+            }
+            for r in rows
+        ]
+    }
+
+
+def align_pages(conn, *, space_key: str | None, page_ids: list[int] | None) -> dict:
+    """Compute and persist correspondence between parsed representations (offline)."""
+    space_id = _space(conn, space_key)["space_id"] if space_key else None
+    targets = repo.parse_targets(conn, space_id, page_ids, all_versions=False)
+    conn.rollback()
+    stats = {"pages": 0, "pairs": 0, "rows_added": 0, "missing_prerequisite": 0, "by_state": {}}
+    items = []
+    for page_id, version in targets:
+        artifacts = repo.latest_artifacts(conn, page_id, version)
+        reps = [r for r in REPRESENTATIONS if r in artifacts]
+        if len(reps) < 2:
+            stats["missing_prerequisite"] += 1
+            items.append(
+                {
+                    "page_id": page_id,
+                    "version_number": version,
+                    "status": "missing_prerequisite",
+                    "detail": f"parsed representations: {reps or 'none'}; need two "
+                    "(confex parse --representations storage,export_view)",
+                }
+            )
+            conn.rollback()
+            continue
+        rows = []
+        for i, left in enumerate(reps):
+            for right in reps[i + 1 :]:
+                rows += corr.match_tables(artifacts[left], artifacts[right])
+                stats["pairs"] += 1
+        with conn.transaction():
+            stats["rows_added"] += repo.insert_correspondence(conn, rows)
+        conn.commit()
+        for r in rows:
+            stats["by_state"][r["state"]] = stats["by_state"].get(r["state"], 0) + 1
+        stats["pages"] += 1
+        items.append(
+            {
+                "page_id": page_id,
+                "version_number": version,
+                "status": "aligned",
+                "representations": reps,
+                "states": {
+                    st: sum(1 for r in rows if r["state"] == st)
+                    for st in ("confirmed", "tentative", "unmatched", "conflicting")
+                },
+            }
+        )
+    return {**stats, "items": items}
+
+
+def selection(conn, page_id: int, version: int | None = None) -> dict:
+    """Which occurrence of each authored table extraction should use, and what blocks it."""
+    page = _page(conn, page_id)
+    version = version or page["current_version"]
+    artifacts = repo.latest_artifacts(conn, page_id, version)
+    if not artifacts:
+        raise ConfexError(
+            "MISSING_PREREQUISITE",
+            f"page {page_id} v{version} has no parse artifacts",
+            EXIT_UNAVAILABLE,
+            {"hint": f"confex parse --page {page_id}"},
+        )
+    ids = [a["artifact_id"] for a in artifacts.values()]
+    rows = repo.correspondence_rows(conn, page_id, version, ids)
+    decisions = {r["correspondence_id"]: r["decision"] for r in rows if r["decision"]}
+    aligned = bool(rows) or len(artifacts) == 1
+    if not aligned:
+        # Several representations but no correspondence yet: nothing is known to be the same
+        # table, so only storage is selectable and the rest is blocked from double counting.
+        out = []
+        for rep, art in artifacts.items():
+            for t in art["tables"]:
+                out.append(
+                    {
+                        "table_id": t["table_id"],
+                        "representation": rep,
+                        "reason": "storage preferred",
+                        "alternates": [],
+                        "blocked": rep != "storage",
+                        "block_reason": None
+                        if rep == "storage"
+                        else "correspondence not computed; run `confex align`",
+                    }
+                )
+        return {"page_id": page_id, "version_number": version, "aligned": False, "selections": out}
+    return {
+        "page_id": page_id,
+        "version_number": version,
+        "aligned": True,
+        "selections": corr.select_for_extraction(artifacts, rows, decisions),
+    }
+
+
+def decide_correspondence(conn, correspondence_id: str, decision: str, actor: str, reason: str):
+    row = repo.get_correspondence(conn, correspondence_id)
+    if row is None:
+        raise not_found(f"correspondence {correspondence_id} does not exist")
+    if row["state"] not in ("tentative", "conflicting"):
+        raise ConfexError(
+            "NOT_APPLICABLE",
+            f"correspondence {correspondence_id} is {row['state']}; only tentative or "
+            "conflicting rows take a decision",
+            EXIT_USAGE,
+        )
+    if decision == "confirmed" and row["right_table_id"] is None:
+        raise ConfexError(
+            "NOT_APPLICABLE", "a row without a counterpart can only be marked distinct", EXIT_USAGE
+        )
+    with conn.transaction():
+        decision_id = repo.add_correspondence_decision(
+            conn, correspondence_id, decision, actor, reason
+        )
+    conn.commit()
+    return {
+        "decision_id": decision_id,
+        "correspondence_id": correspondence_id,
+        "decision": decision,
+        "actor": actor,
+    }
+
+
+def table_tree(conn, resolved: Resolved, table: dict) -> dict:
+    tables = {t["table_id"]: t for t in resolved.artifact["tables"]}
+
+    def node(t: dict) -> dict:
+        return {
+            "table_id": t["table_id"],
+            "selector": f"{resolved.artifact['page_id']}:t{t['ordinal']:02d}",
+            "depth": t["depth"],
+            "parent_cell_id": t["parent_cell_id"],
+            "rows": t["row_count"],
+            "columns": t["column_count"],
+            "geometry_status": t["geometry_status"],
+            "children": [node(tables[c]) for c in t["child_table_ids"] if c in tables],
+        }
+
+    ancestors = []
+    parent = table["parent_table_id"]
+    while parent and parent in tables:
+        p = tables[parent]
+        ancestors.insert(0, {"table_id": p["table_id"], "ordinal": p["ordinal"]})
+        parent = p["parent_table_id"]
+    return {"identity": identity(resolved, table), "ancestors": ancestors, "tree": node(table)}
+
+
+def compare_tables(conn, left: str, right: str, config: ParseConfig | None = None) -> dict:
+    (ra, ta) = resolve_table(conn, left, config=config)
+    (rb, tb) = resolve_table(conn, right, config=config)
+    out = corr.compare(ta, tb)
+    stored = [
+        r
+        for r in repo.correspondence_for_table(conn, ta["table_id"])
+        if tb["table_id"] in (r["left_table_id"], r["right_table_id"])
+    ]
+    out["stored_correspondence"] = stored[0] if stored else None
+    out["left_identity"] = identity(ra, ta)
+    out["right_identity"] = identity(rb, tb)
+    return out

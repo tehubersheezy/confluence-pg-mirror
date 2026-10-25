@@ -103,6 +103,16 @@ def representations_arg(value: str) -> list[str]:
     return reps
 
 
+def actor() -> str:
+    """The local application identity recorded on human decisions (not an enterprise ID)."""
+    import getpass
+
+    try:
+        return f"local:{getpass.getuser()}"
+    except Exception:  # pragma: no cover - no user database entry
+        return "local:unknown"
+
+
 # -- context ---------------------------------------------------------------------------------
 
 

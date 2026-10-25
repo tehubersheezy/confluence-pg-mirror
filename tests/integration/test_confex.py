@@ -271,3 +271,83 @@ def test_jsonl_collections(mirror, capsys):
     assert lines[0]["type"] == "meta" and lines[-1]["type"] == "summary"
     assert {x["type"] for x in lines[1:-1]} == {"item"}
     assert confex.main(["--format", "jsonl", "pages", "show", "1001"]) == inspection.EXIT_USAGE
+
+
+def test_align_selection_and_resolution(mirror, capsys, conn):
+    code, env = run(capsys, "tables", "selection", "1006")
+    assert code == inspection.EXIT_UNAVAILABLE  # no parse artifacts yet
+    assert run(capsys, "parse", "--page", "1006", "--page", "1001")[0] == 0
+    code, env = run(capsys, "align", "--page", "1006", "--page", "1001")
+    assert code == 0 and env["data"]["pages"] == 2
+    states = {i["page_id"]: i["states"] for i in env["data"]["items"]}
+    # The fake renders export_view as storage wrapped in a div: every table corresponds.
+    assert states[1006] == {"confirmed": 6, "tentative": 0, "unmatched": 0, "conflicting": 0}
+    # The page-properties table on 1001 holds macros (user, status) that render differently:
+    # same geometry and heading, different text -> tentative, never confirmed.
+    assert states[1001]["tentative"] == 1 and states[1001]["confirmed"] == 2
+    code, env = run(capsys, "align", "--page", "1006")
+    assert env["data"]["rows_added"] == 0  # immutable, deterministic rows
+
+    code, env = run(capsys, "tables", "selection", "1006")
+    sel = env["data"]["selections"]
+    assert len(sel) == 6 and {s["representation"] for s in sel} == {"storage"}
+    assert all(len(s["alternates"]) == 1 and not s["blocked"] for s in sel)
+
+    code, env = run(capsys, "tables", "show", "1006:t01", "--representation", "storage")
+    links = env["data"]["correspondence"]["links"]
+    assert links[0]["state"] == "confirmed" and links[0]["other_representation"] == "export_view"
+
+    code, env = run(capsys, "pages", "tables", "1006", "--representation", "storage")
+    outer, inner = env["data"][0]["table_id"], env["data"][1]["table_id"]
+    code, env = run(capsys, "tables", "tree", outer)
+    assert env["data"]["tree"]["children"][0]["table_id"] == inner
+    code, env = run(capsys, "tables", "tree", inner)
+    assert env["data"]["ancestors"][0]["table_id"] == outer
+
+    code, env = run(capsys, "pages", "tables", "1006", "--representation", "export_view")
+    rendered = env["data"][0]["table_id"]
+    code, env = run(capsys, "tables", "compare", outer, "--other", rendered)
+    assert env["data"]["same_text"] and env["data"]["stored_correspondence"]["state"] == "confirmed"
+
+    # A confirmed row takes no human decision.
+    corr_id = links[0]["correspondence_id"]
+    code, env = run(
+        capsys, "tables", "resolve", corr_id, "--decision", "distinct", "--reason", "test"
+    )
+    assert code == inspection.EXIT_USAGE
+
+    # Tentative rows: make two identical tables with no distinguishing heading.
+    conn.execute(
+        "UPDATE source.page_content SET body_storage = %s, body_export_view = %s "
+        "WHERE page_id = 1003",
+        (
+            "<table><tr><td>x</td></tr></table>" * 2,
+            "<div>" + "<table><tr><td>x</td></tr></table>" * 2 + "</div>",
+        ),
+    )
+    conn.commit()
+    run(capsys, "parse", "--page", "1003")
+    code, env = run(capsys, "align", "--page", "1003")
+    assert env["data"]["by_state"] == {"tentative": 2}
+    code, env = run(capsys, "tables", "selection", "1003")
+    assert all(s["blocked"] for s in env["data"]["selections"])
+    rows = conn.execute(
+        "SELECT correspondence_id FROM extracted.table_correspondence WHERE page_id = 1003 "
+        "AND state = 'tentative'"
+    ).fetchall()
+    conn.rollback()
+    for (cid,) in rows:
+        code, env = run(
+            capsys,
+            "tables",
+            "resolve",
+            cid,
+            "--decision",
+            "confirmed",
+            "--reason",
+            "same rendered copy",
+        )
+        assert code == 0 and env["data"]["actor"].startswith("local:")
+    code, env = run(capsys, "tables", "selection", "1003")
+    assert len(env["data"]["selections"]) == 2
+    assert not any(s["blocked"] for s in env["data"]["selections"])
