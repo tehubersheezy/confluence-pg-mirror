@@ -53,6 +53,9 @@ rebuilt from `source` offline (`confluence-mirror extract`).
 | | `page_links` | outgoing links with resolved `target_page_id` |
 | | `parse_artifacts` | `confex` structural parses: document model per body capture (JSONB) |
 | | `table_occurrences` | `confex` table index: geometry status, nesting, heading path |
+| | `search_blocks`, `table_correspondence` | `confex` text projection; cross-representation table matches |
+| `pipeline` | `runs`, `run_items`, `attempts`, `classifications`, `units`, `candidate_revisions`, `validation_results`, `entity_match_proposals` | `confex` extraction runs and immutable candidates |
+| `review` | `review_events`, `exports`, `export_items`, `correspondence_decisions` | append-only human decisions and export audit |
 | `sync` | `sync_runs` | one row per run: mode, status, counters, per-page errors |
 
 Views `extracted.current_page_content`, `current_page_macros`, `current_page_tables` and
@@ -145,28 +148,37 @@ confluence-mirror extract --space DEMO   # rebuild extracted.* offline
 Exit codes: `0` success, `1` configuration error, `2` partial (some pages failed; details in
 `sync.sync_runs.errors`), `3` failure, `4` authentication failure.
 
-### 6. Explore and inspect tables (`confex`)
+### 6. Explore, inspect and extract (`confex`)
 
-`confex` reads the mirror offline: it opens the database read-only and makes no network
-calls. Global options go before the subcommand.
+`confex` works on the mirror. Navigation and inspection open the database read-only and
+make no network calls. Global options go before the subcommand.
 
 ```bash
 confex spaces tree DEMO --depth 3 --counts
-confex pages ancestors 12345
-confex parse --space DEMO                   # persist structural artifacts (offline)
+confex parse --space DEMO && confex align --space DEMO     # structural artifacts (offline)
 confex pages outline 12345 --representation storage --tables --macros
-confex pages tables 12345 --representation storage
 confex tables show 12345:t02 --representation storage --view grid
 confex tables show 12345:t02 --representation storage --view cell --cell R3C1
-confex --format json tables show tbl_<id> --view physical
+
+confex extract --page 12345 --plan-only        # no writes, no model calls
+confex extract --page 12345                    # deterministic rules where a template matches
+confex review queue --space DEMO
+confex review approve rev_<id> --reason "Checked source cells"
+confex export --space DEMO --approved-only --output ./approved
 ```
 
-Views are `overview`, `grid`, `physical`, `cell`, `context` and `raw`. Merged cells appear as
-`covered:cN` slots that point at one physical cell. Nested tables are separate occurrences
-that are referenced from their parent cell. Malformed spans stay inspectable as `conflict`
-slots, with diagnostics. Exit codes: `0` ok, `2` usage, `3` not found, `4` unavailable,
-`5` ambiguous selector, `6` internal, `9` partial. See [docs/confex.md](docs/confex.md) for
-what is implemented and how the spec maps onto this schema.
+Merged cells appear as `covered:cN` slots that point at one physical cell. Nested tables
+are separate occurrences, referenced from their parent cell. Malformed spans stay
+inspectable as `conflict` slots, with diagnostics.
+
+Extraction with Claude (Haiku 5.5 by default) is optional. It needs
+`pip install -e '.[model]'`, an `ANTHROPIC_API_KEY`, and an explicit organizational
+approval recorded in `[privacy]` (see `config/config.example.toml`). Until then nothing
+leaves the machine, and rule-based extraction still works. Every candidate needs human
+approval before export.
+
+See [docs/confex.md](docs/confex.md) for the full command set, safety model, exit codes and
+measured results.
 
 To schedule a sync, use `launchd` (user agents in `~/Library/LaunchAgents` need no admin) or
 `cron`.

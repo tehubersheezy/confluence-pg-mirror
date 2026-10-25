@@ -26,19 +26,30 @@ cli.py ──► sync.SpaceSync ──► client.ConfluenceClient   (HTTP, GET o
                ├──► models.py      (pure: API JSON → row dicts)
                ├──► repository.py  (all SQL; idempotent upserts)
                └──► extract/       (pure: storage XHTML → macros/tables/links)
-confex.py ──► inspection.py ──► repository.py            (offline; read-only except `parse`)
-                   └──► structure/ (pure: body → document artifact, table geometry, IDs)
+confex/ (CLI) ──► inspection.py ─┬─► repository.py           (mirror reads; parse/align writes)
+              ├──► pipeline.py ───┼─► repository_pipeline.py  (pipeline.* and review.* SQL)
+              ├──► review.py ─────┘
+              └──► live.py ──► client.ConfluenceClient       (--data-source live; never persists)
+structure/   (pure: body → document artifact, table geometry, IDs)
+extraction/  (pure: registry, classify, units, payload, rules, candidates, validation, privacy)
+extraction/provider.py  (the only module that talks to a model; imports the SDK lazily)
 db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 ```
 
-- **confex** (`docs/confex.md`) never constructs an HTTP client. Navigation and inspection
-  set the connection read-only. Parse artifacts are immutable and content-addressed: bump
-  `structure.document.PARSER_VERSION` when artifact output changes, never update rows in
-  place.
+- **confex** (`docs/confex.md`): mirror commands never construct an HTTP client and run on
+  a read-only connection. Parse artifacts, classifications, units, attempts, revisions and
+  review events are immutable. Bump the stage's version constant (`PARSER_VERSION`,
+  `CLASSIFIER_VERSION`, `PLANNER_VERSION`, `PROMPT_VERSION`, `RULES_VERSION`,
+  `VALIDATOR_VERSION`) when its output changes; never update stored artifacts in place.
+- **Model egress** goes through `extraction.privacy.egress_decision` and nothing else. Do
+  not add a flag that bypasses it, and keep requests free of tools and sampling parameters.
+  Prompts live in `extraction/prompts/`; examples in them must stay synthetic.
+- **Approval is human only.** No code path may write an `approved` review event except
+  `review.decide` called from `confex review approve`.
 
 - **Layering.** `models` and `extract` do no I/O and are unit-tested exhaustively.
-  `repository` owns every SQL statement. `sync` orchestrates and owns transactions. Keep SQL
-  out of `sync.py` and HTTP out of `repository.py`.
+  `repository` and `repository_pipeline` own every SQL statement. `sync` orchestrates and
+  owns transactions. Keep SQL out of `sync.py` and HTTP out of `repository.py`.
 - **Schemas separate provenance.** `source.*` holds what the API returned. `extracted.*`
   holds what we derived, and must be rebuildable from `source` alone (`confluence-mirror
   extract`). `sync.*` holds bookkeeping. Never write derived values into `source`; the one
@@ -84,7 +95,8 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 - Python ≥ 3.11, `from __future__ import annotations`, type hints on public functions.
 - `ruff format` + `ruff check` (config in `pyproject.toml`, line length 100). CI enforces both.
 - Runtime dependencies are deliberately few: `httpx`, `psycopg[binary]`, `lxml`. Adding one
-  needs a reason that holds on a locked-down Mac (pure wheels, no compilers).
+  needs a reason that holds on a locked-down Mac (pure wheels, no compilers, no conda). The
+  Anthropic SDK is the optional `model` extra and is imported only by `extraction/provider.py`.
 - Use `argparse`, not click/typer, and a hand-rolled migration runner, not Alembic. Both
   keep the dependency surface small; revisit only if they become limiting.
 - SQL: compose identifiers with `psycopg.sql`, pass values as parameters, never f-string

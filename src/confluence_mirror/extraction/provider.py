@@ -170,6 +170,27 @@ class AnthropicProvider:
             response_meta={"http_status": http_status},
         )
 
+    def check(self) -> dict[str, Any]:
+        """Connectivity and model availability, sending no document content."""
+        a = self._anthropic
+        try:
+            info = self.client.models.retrieve(self.settings.model)
+        except a.APIStatusError as exc:
+            return {
+                "ok": False,
+                "http_status": exc.status_code,
+                "error": redact(f"{type(exc).__name__}: {exc}"),
+            }
+        except (a.APITimeoutError, a.APIConnectionError) as exc:
+            return {"ok": False, "error": redact(f"{type(exc).__name__}: {exc}")}
+        return {
+            "ok": True,
+            "model": info.id,
+            "max_input_tokens": getattr(info, "max_input_tokens", None),
+            "max_tokens": getattr(info, "max_tokens", None),
+            "sdk_version": getattr(a, "__version__", None),
+        }
+
     def close(self) -> None:
         self.client.close()
 
