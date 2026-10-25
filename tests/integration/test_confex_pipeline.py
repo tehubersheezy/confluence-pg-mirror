@@ -115,7 +115,8 @@ def env(conn, rich_storage, pg_dsn, monkeypatch, tmp_path):
     fake = FakeConfluence()
     demo_space(fake, rich_storage)
     geometry = (FIXTURES / "storage" / "geometry_page.xml").read_text(encoding="utf-8")
-    fake.add_page(1006, "DEMO", "Servers", 1002, geometry, position=5)
+    rendered = (FIXTURES / "render" / "geometry_page.html").read_text(encoding="utf-8")
+    fake.add_page(1006, "DEMO", "Servers", 1002, geometry, rendered=rendered, position=5)
     fake.add_page(1007, "DEMO", "Hosts", 1001, HOSTS, position=6)
     fake.add_page(1008, "DEMO", "Web", 1001, FORMULA, position=7)
     assert sync(conn, fake).status == "succeeded"
@@ -125,7 +126,6 @@ def env(conn, rich_storage, pg_dsn, monkeypatch, tmp_path):
     monkeypatch.setattr(provider_mod, "make_provider", lambda settings: model)
     (tmp_path / "config.toml").write_text("")
     assert confex.main(["parse", "--space", "DEMO"]) == 0
-    assert confex.main(["align", "--space", "DEMO"]) == 0
     return fake, model, tmp_path
 
 
@@ -139,7 +139,7 @@ def tid(conn, page, ordinal=1):
     return scalar(
         conn,
         "SELECT table_id FROM extracted.table_occurrences WHERE page_id = %s "
-        "AND representation = 'storage' AND ordinal = %s",
+        "AND representation = 'export_view' AND ordinal = %s",
         page,
         ordinal,
     )

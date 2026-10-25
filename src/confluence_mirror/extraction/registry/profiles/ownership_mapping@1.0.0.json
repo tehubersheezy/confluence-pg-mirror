@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Two or more columns mapping a subject to its owner.",
   "families": ["ownership_mapping", "inventory"],
-  "representations": ["storage", "export_view"],
+  "representations": ["export_view", "view"],
   "schema": "ownership_mapping.v1",
   "template": {"header": "first_row", "required_fields": ["subject", "owner"], "min_bound_columns": 2},
   "header_bindings": {

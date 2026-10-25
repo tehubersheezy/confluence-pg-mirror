@@ -19,7 +19,8 @@ def mirror(conn, rich_storage, pg_dsn, monkeypatch, tmp_path):
     fake = FakeConfluence()
     demo_space(fake, rich_storage)
     geometry = (FIXTURES / "storage" / "geometry_page.xml").read_text(encoding="utf-8")
-    fake.add_page(1006, "DEMO", "Servers", 1002, geometry, position=5)
+    rendered = (FIXTURES / "render" / "geometry_page.html").read_text(encoding="utf-8")
+    fake.add_page(1006, "DEMO", "Servers", 1002, geometry, rendered=rendered, position=5)
     report = sync(conn, fake)
     assert report.status == "succeeded", report.errors
     monkeypatch.chdir(tmp_path)
@@ -91,7 +92,7 @@ def test_navigation(mirror, capsys):
     code, env = run(capsys, "pages", "show", "1006")
     page = env["data"]
     assert page["breadcrumbs"][-1]["title"] == "Child Page"
-    assert page["representations_available"] == ["storage", "export_view", "view"]
+    assert page["representations_available"] == ["export_view", "view"]
     assert page["parse_artifacts"] == [] and page["known_tables"] is None
 
     code, env = run(capsys, "pages", "show", "99999")
@@ -102,9 +103,9 @@ def test_table_inspection_without_persisted_parse(mirror, capsys, conn):
     code, env = run(capsys, "tables", "show", "1006:t01")
     assert code == inspection.EXIT_AMBIGUOUS
     choices = env["error"]["details"]["choices"]
-    assert len(choices) == 3  # storage, export_view and view are never silently equated
+    assert len(choices) == 2  # export_view and view are never silently equated
 
-    code, env = run(capsys, "tables", "show", "1006:t01", "--representation", "storage")
+    code, env = run(capsys, "tables", "show", "1006:t01", "--representation", "export_view")
     assert code == 0
     data = env["data"]
     assert data["identity"]["parse_mode"] == "ephemeral_parse"
@@ -118,7 +119,7 @@ def test_table_inspection_without_persisted_parse(mirror, capsys, conn):
         "show",
         "1006:t01",
         "--representation",
-        "storage",
+        "export_view",
         "--view",
         "cell",
         "--cell",
@@ -135,7 +136,7 @@ def test_table_inspection_without_persisted_parse(mirror, capsys, conn):
         "show",
         "1006:t01",
         "--representation",
-        "storage",
+        "export_view",
         "--view",
         "grid",
         "--rows",
@@ -146,17 +147,24 @@ def test_table_inspection_without_persisted_parse(mirror, capsys, conn):
     assert env["data"]["grid"][1][2]["nested"]
 
     code, env = run(
-        capsys, "tables", "show", "1006:t06", "--representation", "storage", "--view", "overview"
+        capsys,
+        "tables",
+        "show",
+        "1006:t06",
+        "--representation",
+        "export_view",
+        "--view",
+        "overview",
     )
     assert env["data"]["geometry_status"] == "invalid"
     assert "SPAN_OVERLAP" in [d["code"] for d in env["data"]["diagnostics"]]
 
     code, env = run(
-        capsys, "tables", "show", "1006:t01", "--representation", "storage", "--view", "payload"
+        capsys, "tables", "show", "1006:t01", "--representation", "export_view", "--view", "payload"
     )
     assert code == inspection.EXIT_UNAVAILABLE and env["error"]["code"] == "PAYLOAD_NOT_READY"
 
-    code, env = run(capsys, "tables", "show", "1006:t09", "--representation", "storage")
+    code, env = run(capsys, "tables", "show", "1006:t09", "--representation", "export_view")
     assert code == inspection.EXIT_NOT_FOUND
 
     # Inspection wrote nothing.
@@ -165,11 +173,11 @@ def test_table_inspection_without_persisted_parse(mirror, capsys, conn):
 
 def test_parse_then_inspect_by_persistent_id(mirror, capsys, conn):
     code, env = run(capsys, "parse", "--space", "DEMO")
-    assert code == 0 and env["data"]["parsed"] == 12 and env["data"]["failed"] == 0
+    assert code == 0 and env["data"]["parsed"] == 6 and env["data"]["failed"] == 0
     code, env = run(capsys, "parse", "--space", "DEMO")
-    assert env["data"]["reused"] == 12 and env["data"]["parsed"] == 0  # immutable artifacts
+    assert env["data"]["reused"] == 6 and env["data"]["parsed"] == 0  # immutable artifacts
 
-    code, env = run(capsys, "tables", "list", "--space", "DEMO", "--representation", "storage")
+    code, env = run(capsys, "tables", "list", "--space", "DEMO", "--representation", "export_view")
     by_page = [(t["page_id"], t["ordinal"]) for t in env["data"]]
     assert (1006, 1) in by_page and (1003, 1) in by_page
     code, env = run(
@@ -179,13 +187,13 @@ def test_parse_then_inspect_by_persistent_id(mirror, capsys, conn):
         "--page",
         "1006",
         "--representation",
-        "storage",
+        "export_view",
         "--nested",
         "only",
     )
     assert [t["ordinal"] for t in env["data"]] == [2]
 
-    code, env = run(capsys, "pages", "tables", "1006", "--representation", "storage")
+    code, env = run(capsys, "pages", "tables", "1006", "--representation", "export_view")
     first = env["data"][0]
     code, env = run(capsys, "tables", "show", first["table_id"], "--view", "physical")
     assert code == 0 and env["data"]["identity"]["parse_mode"] == "persisted"
@@ -194,20 +202,25 @@ def test_parse_then_inspect_by_persistent_id(mirror, capsys, conn):
     code, env = run(capsys, "tables", "show", first["table_id"], "--representation", "view")
     assert code == inspection.EXIT_USAGE and env["error"]["code"] == "ARGUMENT_CONFLICT"
 
-    code, env = run(capsys, "tables", "show", "1006:t01", "--representation", "storage")
+    code, env = run(capsys, "tables", "show", "1006:t01", "--representation", "export_view")
     assert env["data"]["identity"]["parse_mode"] == "persisted"
     snapshot = env["source"]["snapshot_id"]
     code, env = run(capsys, "tables", "show", "1006:t01", "--snapshot", snapshot)
     assert code == 0 and env["data"]["identity"]["table_id"] == first["table_id"]
 
-    code, env = run(capsys, "pages", "outline", "1006", "--representation", "storage", "--tables")
+    code, env = run(
+        capsys, "pages", "outline", "1006", "--representation", "export_view", "--tables"
+    )
     outline = env["data"]["outline"]
     assert [n["text"] for n in outline if n["kind"] == "heading"][:2] == ["Inventory", "Servers"]
     nested = next(n for n in outline if n.get("selector") == "1006:t02")
     assert nested["container_depth"] == 1
 
     code, env = run(capsys, "pages", "show", "1006")
-    assert env["data"]["known_tables"] == {"export_view": 6, "storage": 6}
+    assert env["data"]["known_tables"] == {"export_view": 6}
+    # Storage is mirrored but never parsed, and is not a representation confex accepts.
+    code, env = run(capsys, "tables", "show", "1006:t01", "--representation", "storage")
+    assert code == inspection.EXIT_USAGE
 
 
 def test_plain_output_is_terminal_safe(mirror, capsys, conn):
@@ -218,7 +231,9 @@ def test_plain_output_is_terminal_safe(mirror, capsys, conn):
     assert "\x1b" not in out and "\\x1b[31mred" in out
 
     assert (
-        confex.main(["tables", "show", "1006:t01", "--representation", "storage", "--view", "grid"])
+        confex.main(
+            ["tables", "show", "1006:t01", "--representation", "export_view", "--view", "grid"]
+        )
         == 0
     )
     out = capsys.readouterr().out
@@ -232,7 +247,7 @@ def test_plain_output_is_terminal_safe(mirror, capsys, conn):
                 "show",
                 "1006:t01",
                 "--representation",
-                "storage",
+                "export_view",
                 "--view",
                 "cell",
                 "--cell",
@@ -273,81 +288,11 @@ def test_jsonl_collections(mirror, capsys):
     assert confex.main(["--format", "jsonl", "pages", "show", "1001"]) == inspection.EXIT_USAGE
 
 
-def test_align_selection_and_resolution(mirror, capsys, conn):
-    code, env = run(capsys, "tables", "selection", "1006")
-    assert code == inspection.EXIT_UNAVAILABLE  # no parse artifacts yet
-    assert run(capsys, "parse", "--page", "1006", "--page", "1001")[0] == 0
-    code, env = run(capsys, "align", "--page", "1006", "--page", "1001")
-    assert code == 0 and env["data"]["pages"] == 2
-    states = {i["page_id"]: i["states"] for i in env["data"]["items"]}
-    # The fake renders export_view as storage wrapped in a div: every table corresponds.
-    assert states[1006] == {"confirmed": 6, "tentative": 0, "unmatched": 0, "conflicting": 0}
-    # The page-properties table on 1001 holds macros (user, status) that render differently:
-    # same geometry and heading, different text -> tentative, never confirmed.
-    assert states[1001]["tentative"] == 1 and states[1001]["confirmed"] == 2
-    code, env = run(capsys, "align", "--page", "1006")
-    assert env["data"]["rows_added"] == 0  # immutable, deterministic rows
-
-    code, env = run(capsys, "tables", "selection", "1006")
-    sel = env["data"]["selections"]
-    assert len(sel) == 6 and {s["representation"] for s in sel} == {"storage"}
-    assert all(len(s["alternates"]) == 1 and not s["blocked"] for s in sel)
-
-    code, env = run(capsys, "tables", "show", "1006:t01", "--representation", "storage")
-    links = env["data"]["correspondence"]["links"]
-    assert links[0]["state"] == "confirmed" and links[0]["other_representation"] == "export_view"
-
-    code, env = run(capsys, "pages", "tables", "1006", "--representation", "storage")
+def test_table_tree(mirror, capsys, conn):
+    assert run(capsys, "parse", "--page", "1006")[0] == 0
+    code, env = run(capsys, "pages", "tables", "1006")
     outer, inner = env["data"][0]["table_id"], env["data"][1]["table_id"]
     code, env = run(capsys, "tables", "tree", outer)
     assert env["data"]["tree"]["children"][0]["table_id"] == inner
     code, env = run(capsys, "tables", "tree", inner)
     assert env["data"]["ancestors"][0]["table_id"] == outer
-
-    code, env = run(capsys, "pages", "tables", "1006", "--representation", "export_view")
-    rendered = env["data"][0]["table_id"]
-    code, env = run(capsys, "tables", "compare", outer, "--other", rendered)
-    assert env["data"]["same_text"] and env["data"]["stored_correspondence"]["state"] == "confirmed"
-
-    # A confirmed row takes no human decision.
-    corr_id = links[0]["correspondence_id"]
-    code, env = run(
-        capsys, "tables", "resolve", corr_id, "--decision", "distinct", "--reason", "test"
-    )
-    assert code == inspection.EXIT_USAGE
-
-    # Tentative rows: make two identical tables with no distinguishing heading.
-    conn.execute(
-        "UPDATE source.page_content SET body_storage = %s, body_export_view = %s "
-        "WHERE page_id = 1003",
-        (
-            "<table><tr><td>x</td></tr></table>" * 2,
-            "<div>" + "<table><tr><td>x</td></tr></table>" * 2 + "</div>",
-        ),
-    )
-    conn.commit()
-    run(capsys, "parse", "--page", "1003")
-    code, env = run(capsys, "align", "--page", "1003")
-    assert env["data"]["by_state"] == {"tentative": 2}
-    code, env = run(capsys, "tables", "selection", "1003")
-    assert all(s["blocked"] for s in env["data"]["selections"])
-    rows = conn.execute(
-        "SELECT correspondence_id FROM extracted.table_correspondence WHERE page_id = 1003 "
-        "AND state = 'tentative'"
-    ).fetchall()
-    conn.rollback()
-    for (cid,) in rows:
-        code, env = run(
-            capsys,
-            "tables",
-            "resolve",
-            cid,
-            "--decision",
-            "confirmed",
-            "--reason",
-            "same rendered copy",
-        )
-        assert code == 0 and env["data"]["actor"].startswith("local:")
-    code, env = run(capsys, "tables", "selection", "1003")
-    assert len(env["data"]["selections"]) == 2
-    assert not any(s["blocked"] for s in env["data"]["selections"])

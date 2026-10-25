@@ -1,4 +1,4 @@
-"""tables list | show | tree | compare."""
+"""tables list | show | tree."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from confluence_mirror import repository as repo
 from confluence_mirror.confex.core import (
     Context,
     Result,
-    actor,
     collection_args,
     command,
     group,
@@ -52,21 +51,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     tt.add_argument("--representation", choices=REP_CHOICES, default="auto")
     tt.add_argument("--version", dest="page_version", type=int)
     tt.add_argument("--snapshot")
-    tc = leaf(tg, "tables.compare", "structural comparison of two occurrences")
-    tc.add_argument("selector")
-    tc.add_argument("--other", required=True)
-    tsel = leaf(tg, "tables.selection", "which occurrence extraction uses per authored table")
-    tsel.add_argument("page_id", type=int)
-    tsel.add_argument("--version", dest="page_version", type=int)
-    tr = leaf(tg, "tables.resolve", "decide a tentative or conflicting correspondence")
-    tr.add_argument("correspondence_id")
-    tr.add_argument("--decision", choices=("confirmed", "distinct"), required=True)
-    tr.add_argument("--reason", required=True)
-
-    al = leaf(sub, "align", "compute cross-representation table correspondence (offline)")
-    scope = al.add_mutually_exclusive_group(required=True)
-    scope.add_argument("--space", metavar="KEY")
-    scope.add_argument("--page", type=int, action="append", metavar="ID")
 
 
 @command("tables.list", collection=True, plain=plain_table_list)
@@ -287,78 +271,6 @@ def tables_tree(args, ctx: Context) -> Result:
         snapshot=args.snapshot,
     )
     return Result(ins.table_tree(conn, resolved, tbl), source=_source(resolved))
-
-
-def _plain_compare(data, args):
-    out = kv(
-        [
-            (k, data[k])
-            for k in (
-                "left",
-                "right",
-                "dimensions",
-                "same_geometry",
-                "same_text",
-                "same_header",
-                "same_heading_path",
-                "similarity",
-            )
-        ]
-    )
-    stored = data["stored_correspondence"]
-    out += f"stored correspondence: {stored['state'] if stored else 'none'}\n"
-    for d in data["cell_differences"][:50]:
-        out += f"  {d['coord']}: {safe(d['left'])} | {safe(d['right'])}\n"
-    return out
-
-
-@command("tables.compare", plain=_plain_compare)
-def tables_compare(args, ctx: Context) -> Result:
-    return Result(ins.compare_tables(ctx.conn(), args.selector, args.other))
-
-
-def _plain_selection(data, args):
-    rows = [
-        [
-            s["table_id"],
-            s["representation"],
-            len(s["alternates"]),
-            "BLOCKED" if s["blocked"] else "ok",
-            s["block_reason"] or s["reason"],
-        ]
-        for s in data["selections"]
-    ]
-    return table(["table_id", "representation", "alternates", "status", "reason"], rows)
-
-
-@command("tables.selection", plain=_plain_selection)
-def tables_selection(args, ctx: Context) -> Result:
-    return Result(ins.selection(ctx.conn(), args.page_id, args.page_version))
-
-
-@command("tables.resolve", writes=True)
-def tables_resolve(args, ctx: Context) -> Result:
-    return Result(
-        ins.decide_correspondence(
-            ctx.conn(), args.correspondence_id, args.decision, actor(), args.reason
-        )
-    )
-
-
-def _plain_align(data, args):
-    out = kv([(k, v) for k, v in data.items() if k != "items"])
-    for item in data["items"]:
-        detail = item.get("detail") or item.get("states")
-        out += (
-            f"page {item['page_id']} v{item['version_number']}: {item['status']} {safe(detail)}\n"
-        )
-    return out
-
-
-@command("align", writes=True, plain=_plain_align)
-def align_cmd(args, ctx: Context) -> Result:
-    data = ins.align_pages(ctx.conn(), space_key=args.space, page_ids=args.page)
-    return Result(data)
 
 
 def _payload_view(args, ctx: Context, resolved: ins.Resolved, tbl: dict) -> Result:

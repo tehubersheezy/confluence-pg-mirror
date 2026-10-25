@@ -83,57 +83,18 @@ def test_full_sync_mirrors_space(conn, fake):
     assert run == [("succeeded", "full", 5, [])]
 
 
-def test_extraction_and_link_resolution(conn, fake):
+def test_sync_stores_storage_but_derives_nothing_from_it(conn, fake):
     sync(conn, fake)
-    macros = rows(
-        conn,
-        "SELECT macro_name, parent_macro_index FROM extracted.page_macros "
-        "WHERE page_id = 1001 ORDER BY macro_index",
+    # The storage body is mirrored as Confluence returned it...
+    assert "ac:structured-macro" in scalar(
+        conn, "SELECT body_storage FROM source.page_content WHERE page_id = 1001"
     )
-    assert macros == [
-        ("info", None),
-        ("code", 0),
-        ("details", None),
-        ("status", 2),
-        ("include", None),
-    ]
+    # ...and nothing is derived from it: the legacy extraction tables stay empty.
+    for table in ("page_macros", "macro_extractions", "page_tables", "page_links"):
+        assert scalar(conn, f"SELECT count(*) FROM extracted.{table}") == 0
     assert (
-        scalar(
-            conn,
-            "SELECT data->>'language' FROM extracted.macro_extractions "
-            "WHERE page_id = 1001 AND extraction_type = 'code'",
-        )
-        == "python"
+        scalar(conn, "SELECT count(*) FROM source.page_content WHERE extracted_at IS NOT NULL") == 0
     )
-    assert scalar(conn, "SELECT records FROM extracted.page_tables WHERE page_id = 1003") == [
-        {"K": "a", "V": "1"}
-    ]
-    links = dict(
-        rows(
-            conn,
-            "SELECT target_title, target_page_id FROM extracted.page_links "
-            "WHERE page_id = 1001 AND target_title IS NOT NULL "
-            "AND target_filename IS NULL",
-        )
-    )
-    # Same-space titles resolve; OTHER is not mirrored so "Elsewhere" stays unresolved.
-    assert links == {
-        "Child Page": 1002,
-        "Root Page": 1001,
-        "Shared Snippet": 1005,
-        "Elsewhere": None,
-    }
-    # Child (synced before the parent it links to? no: parents first) links back to root.
-    assert (
-        scalar(conn, "SELECT target_page_id FROM extracted.page_links WHERE page_id = 1002") == 1001
-    )
-    in_mirror = rows(
-        conn,
-        "SELECT target_page_id, target_in_mirror FROM "
-        "extracted.current_page_links WHERE page_id = 1001 AND source_element"
-        " = 'a' AND target_page_id = 1003",
-    )
-    assert in_mirror == [(1003, True)]
 
 
 def test_resync_is_idempotent(conn, fake):
@@ -176,12 +137,6 @@ def test_incremental_fetches_only_changes_and_keeps_history(conn, fake):
     ) == [(1, "Sibling Page"), (2, "Sibling Renamed")]
     assert scalar(conn, "SELECT count(*) FROM source.page_content WHERE page_id = 1004") == 2
     assert scalar(conn, "SELECT current_version FROM source.pages WHERE page_id = 1004") == 2
-    # Extraction is per version; the current-view shows only v2's link.
-    assert rows(
-        conn,
-        "SELECT version_number, target_page_id FROM extracted.current_page_links "
-        "WHERE page_id = 1004",
-    ) == [(2, 1002)]
     assert (
         scalar(
             conn,
@@ -387,51 +342,6 @@ def test_no_writes_and_no_token_in_database(conn, fake):
 def test_client_helper_sends_bearer(fake):
     client_for(fake).current_user()
     assert fake.requests[-1].headers["Authorization"] == f"Bearer {TOKEN}"
-
-
-def test_stale_extraction_is_rebuilt_offline(conn, fake):
-    sync(conn, fake)
-    conn.execute("UPDATE source.page_content SET extractor_version = '0.0' WHERE page_id = 1003")
-    conn.execute("DELETE FROM extracted.page_tables WHERE page_id = 1003")
-    conn.commit()
-    fetched = body_fetches(fake)
-    report = sync(conn, fake)
-    assert report.stats["reextracted"] == 1
-    assert body_fetches(fake) == fetched  # rebuilt from the stored body
-    assert scalar(conn, "SELECT count(*) FROM extracted.page_tables WHERE page_id = 1003") == 1
-
-
-def test_extractor_failure_keeps_source_and_is_retried(conn, fake, monkeypatch):
-    from confluence_mirror import sync as sync_module
-
-    real = sync_module.extract
-
-    def broken(storage, **kw):
-        if kw.get("page_id") == 1004:
-            raise RuntimeError("extractor bug")
-        return real(storage, **kw)
-
-    monkeypatch.setattr(sync_module, "extract", broken)
-    report = sync(conn, fake)
-    assert report.status == "partial"
-    assert report.errors == [
-        {"stage": "extract", "error": "RuntimeError: extractor bug", "page_id": 1004}
-    ]
-    # Source data was committed even though extraction failed.
-    assert (
-        scalar(conn, "SELECT extractor_version FROM source.page_content WHERE page_id = 1004")
-        is None
-    )
-    monkeypatch.setattr(sync_module, "extract", real)
-    report = sync(conn, fake)
-    assert report.status == "succeeded"
-    assert (
-        scalar(
-            conn,
-            "SELECT extractor_version IS NOT NULL FROM source.page_content WHERE page_id = 1004",
-        )
-        is True
-    )
 
 
 def test_status_any_rejected_falls_back(conn, fake):

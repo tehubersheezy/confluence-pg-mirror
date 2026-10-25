@@ -26,16 +26,6 @@ from typing import Any
 import lxml.html
 from lxml import etree
 
-from confluence_mirror.extract.storage import (
-    ROOT_TAG,
-    ac_attr,
-    element_path,
-    parse_storage_report,
-    qname,
-    resource_ref,
-    ri_attr,
-    serialize,
-)
 from confluence_mirror.structure import grid
 from confluence_mirror.structure.ids import (
     DEFAULT_INSTANCE_ID,
@@ -44,14 +34,23 @@ from confluence_mirror.structure.ids import (
     sha256_text,
     snapshot_id,
 )
+from confluence_mirror.structure.links import classify_href
+from confluence_mirror.structure.markup import (
+    ROOT_TAG,
+    element_path,
+    macro_name,
+    qname,
+    serialize,
+)
 
 # Bump when artifact output changes; it is part of every artifact fingerprint.
-PARSER_VERSION = "structure.2"
-REPRESENTATIONS = ("storage", "export_view", "view")
+PARSER_VERSION = "structure.3"
+# Rendered HTML only. Storage format is mirrored but never parsed: it lacks everything
+# macros render (includes, reports, Jira tables) and is not what readers see.
+REPRESENTATIONS = ("export_view", "view")
 EVIDENCE_TEXT_POLICY = "evidence-text.v1"
 
 _HEADINGS = {f"h{i}": i for i in range(1, 7)}
-_MACROS = ("ac:structured-macro", "ac:macro")
 _GROUP_TAGS = ("thead", "tbody", "tfoot")
 _BLOCK_TAGS = frozenset(
     {
@@ -65,26 +64,9 @@ _BLOCK_TAGS = frozenset(
         "blockquote",
         "hr",
         *_HEADINGS,
-        "ac:structured-macro",
-        "ac:macro",
-        "ac:rich-text-body",
-        "ac:task",
-        "ac:layout-section",
-        "ac:layout-cell",
     }
 )
-_SKIP_TAGS = frozenset(
-    {
-        "ac:parameter",
-        "ac:default-parameter",
-        "ac:task-id",
-        "ac:task-status",
-        "ac:task-uuid",
-        "ac:placeholder",
-        "script",
-        "style",
-    }
-)
+_SKIP_TAGS = frozenset({"script", "style", "template", "noscript"})
 _CONTEXT_TAGS = frozenset({"p", "ul", "ol", "div", "blockquote", "pre"})
 # Flow blocks recorded as text nodes, so a page can be read back in source order.
 _FLOW_KINDS = {
@@ -105,10 +87,6 @@ _STRUCTURAL = frozenset(
         "blockquote",
         "li",
         *_HEADINGS,
-        *_MACROS,
-        "ac:layout",
-        "ac:layout-section",
-        "ac:layout-cell",
     }
 )
 _WS_RE = re.compile(r"\s+")
@@ -158,9 +136,9 @@ class _Text:
     """Evidence-text builder.
 
     Policy ``evidence-text.v1``: whitespace runs inside text nodes collapse to one space
-    (as HTML renders them), except inside ``pre`` and plain-text macro bodies, which are
-    kept verbatim; ``br`` and block boundaries become one newline; spaces around newlines
-    and at both ends are trimmed.
+    (as HTML renders them), except inside ``pre``, which is kept verbatim; ``br`` and
+    block boundaries become one newline; spaces around newlines and at both ends are
+    trimmed.
     """
 
     def __init__(self) -> None:
@@ -201,32 +179,6 @@ def _render(el: etree._Element, buf: _Text, *, stop_at_tables: bool, out: list |
             pass
         elif name == "br":
             buf.newline()
-        elif name in _MACROS and ac_attr(child, "name") == "status":
-            title = next(
-                (
-                    p.text
-                    for p in child
-                    if qname(p) == "ac:parameter" and ac_attr(p, "name") == "title"
-                ),
-                None,
-            )
-            buf.text(title)
-        elif name == "ac:plain-text-body":
-            buf.newline()
-            buf.text(child.text, verbatim=True)
-            buf.newline()
-        elif name == "ac:link" and not any(
-            qname(c) in ("ac:link-body", "ac:plain-text-link-body") for c in child
-        ):
-            for ref in child:
-                if qname(ref).startswith("ri:"):
-                    buf.text(
-                        ri_attr(ref, "content-title")
-                        or ri_attr(ref, "filename")
-                        or ri_attr(ref, "space-key")
-                        or "@" + (ri_attr(ref, "userkey") or ri_attr(ref, "username") or "user")
-                    )
-                    break
         else:
             block = name in _BLOCK_TAGS or name in ("td", "th", "table")
             if block:
@@ -275,19 +227,10 @@ def _nearest(el: etree._Element, names: tuple[str, ...]) -> etree._Element | Non
 
 
 def _attrs(el: etree._Element) -> dict[str, str]:
-    out = {}
-    for key, value in el.attrib.items():
-        if key.startswith("{"):
-            ns, _, local = key[1:].partition("}")
-            prefix = {"http://atlassian.com/content": "ac"}.get(ns, "ri")
-            key = f"{prefix}:{local}"
-        out[key] = value
-    return out
+    return dict(el.attrib)
 
 
-def _is_layout_cell(el: etree._Element, representation: str) -> bool:
-    if representation == "storage":
-        return qname(el) == "ac:layout-cell"
+def _is_layout_cell(el: etree._Element) -> bool:
     return el.tag == "div" and "cell" in (el.get("class") or "").split() and el.get("data-type")
 
 
@@ -361,22 +304,10 @@ class _Builder:
     # -- walk --
 
     def collect_tables(self, root: etree._Element) -> None:
-        literal = 0
         for table in root.iter("table"):
-            if _nearest(table, ("ac:plain-text-body",)) is not None:
-                literal += 1
-                continue
             table_id = opaque_id("tbl", self.artifact_id, element_path(table))
             self.table_ids[table] = table_id
             self.ordinals[table_id] = len(self.ordinals) + 1
-        if literal:
-            self.diagnostics.append(
-                grid.diagnostic(
-                    "LITERAL_TABLE_MARKUP",
-                    "info",
-                    f"{literal} table(s) inside plain-text macro bodies kept as literal text",
-                )
-            )
 
     def walk(self, el: etree._Element, scope: _Scope) -> None:
         for child in el:
@@ -404,27 +335,28 @@ class _Builder:
                 self.blocks[block_id]["section_id"] = sec_id
             elif name == "table" and child in self.table_ids:
                 self.table(child, scope)
-            elif name in _MACROS:
+            elif macro_name(child):
+                # A rendered macro (Confluence marks it with data-macro-name): its output is
+                # walked as the macro's body, so its headings and tables are scoped to it.
                 macro_id = opaque_id("mac", self.artifact_id, element_path(child))
-                macro_name = ac_attr(child, "name") or ""
-                self.node("macro", macro_id, child, scope, name=macro_name)
-                container = {"kind": "macro", "id": macro_id, "name": macro_name}
-                for body in child:
-                    if isinstance(body.tag, str) and qname(body) == "ac:rich-text-body":
-                        self.walk(body, scope.child("macro_body", container))
-            elif _is_layout_cell(child, self.representation):
+                name = macro_name(child)
+                self.node("macro", macro_id, child, scope, name=name)
+                container = {"kind": "macro", "id": macro_id, "name": name}
+                self.walk(child, scope.child("macro_body", container))
+            elif _is_layout_cell(child):
                 cell_node_id = opaque_id("lay", self.artifact_id, element_path(child))
                 self.node("layout_cell", cell_node_id, child, scope)
                 container = {"kind": "layout_cell", "id": cell_node_id}
                 self.walk(child, scope.child("layout_cell", container))
             elif name in _FLOW_KINDS:
                 self.flow(child, name, scope)
-            elif name != "ac:plain-text-body":
+            else:
                 self.walk(child, scope)
 
     def flow(self, el: etree._Element, name: str, scope: _Scope) -> None:
         nested = any(
-            isinstance(d.tag, str) and qname(d) in _STRUCTURAL for d in el.iterdescendants()
+            isinstance(d.tag, str) and (qname(d) in _STRUCTURAL or macro_name(d))
+            for d in el.iterdescendants()
         )
         if not nested:
             text = evidence_text(el)
@@ -625,9 +557,9 @@ class _Builder:
             name = qname(sib)
             if name in _HEADINGS or name == "table" or next(sib.iter("table"), None) is not None:
                 return None
+            if macro_name(sib) or _is_layout_cell(sib):
+                return None  # container boundary
             if name not in _CONTEXT_TAGS:
-                if name in _MACROS or name.startswith("ac:layout"):
-                    return None  # container boundary
                 continue
             text = evidence_text(sib)
             if not text:
@@ -644,18 +576,26 @@ def _links(cell: etree._Element) -> list[dict]:
     for el in cell.iter():
         if not isinstance(el.tag, str) or _nearest(el, ("td", "th")) is not cell:
             continue
-        name = qname(el)
-        if name == "a" and el.get("href"):
+        if qname(el) == "a" and el.get("href"):
             out.append({"kind": "href", "target": el.get("href")})
-        elif name == "ac:link":
-            ref = next(
-                (resource_ref(c) for c in el if isinstance(c.tag, str) and qname(c)[:3] == "ri:"),
-                None,
-            )
-            item: dict[str, Any] = {"kind": "resource", "target": ref}
-            if ac_attr(el, "anchor"):
-                item["anchor"] = ac_attr(el, "anchor")
-            out.append(item)
+    return out
+
+
+def _document_links(root: etree._Element) -> list[dict]:
+    """Every rendered link in the page, in document order, classified by its URL."""
+    out = []
+    for el in root.iter("a"):
+        href = el.get("href")
+        if not href or href.startswith("javascript:"):
+            continue
+        out.append(
+            {
+                "href": href,
+                "text": normalize(evidence_text(el)),
+                "element_path": element_path(el),
+                **classify_href(href),
+            }
+        )
     return out
 
 
@@ -687,6 +627,7 @@ def parse_document(
         "nodes": [],
         "blocks": {},
         "tables": [],
+        "links": [],
     }
     size = len(body.encode("utf-8"))
     if size > config.limits.max_body_bytes:
@@ -700,10 +641,7 @@ def parse_document(
         )
         return artifact
 
-    if representation == "storage":
-        root, recoveries = parse_storage_report(body)
-    else:
-        root, recoveries = _parse_html(body)
+    root, recoveries = _parse_html(body)
     builder = _Builder(identity["artifact_id"], representation, config)
     if recoveries:
         artifact["status"] = "recovered"
@@ -738,4 +676,5 @@ def parse_document(
     artifact["nodes"] = builder.nodes
     artifact["blocks"] = builder.blocks
     artifact["tables"] = sorted(builder.tables.values(), key=lambda t: t["ordinal"])
+    artifact["links"] = _document_links(root)
     return artifact

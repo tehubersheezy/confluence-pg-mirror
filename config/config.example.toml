@@ -53,7 +53,8 @@ body_batch_size = 50
 page_properties = "none"
 # Optional: download attachment binaries to this directory (metadata is always mirrored).
 # attachment_dir = "./attachments"
-# Body representations fetched per page (storage is required).
+# Bodies fetched per page. export_view (or view) is what confex parses and extracts from;
+# storage is mirrored as returned but never parsed. At least one rendered format is required.
 # representations = ["storage", "export_view", "view"]
 
 # ---------------------------------------------------------------------------------------

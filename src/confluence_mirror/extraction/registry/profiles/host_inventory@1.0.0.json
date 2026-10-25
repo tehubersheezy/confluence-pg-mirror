@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Header-row tables listing hosts or servers, one or more per row.",
   "families": ["inventory"],
-  "representations": ["storage", "export_view"],
+  "representations": ["export_view", "view"],
   "schema": "host_inventory.v1",
   "template": {
     "header": "first_row",

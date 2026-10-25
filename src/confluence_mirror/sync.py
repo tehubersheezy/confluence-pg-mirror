@@ -4,7 +4,7 @@ Discovery always lists every current page of the space with lightweight metadata
 ancestors, labels). Comparing that listing with the mirror drives everything else:
 
 * new page, newer version, or missing body  -> full fetch (bodies, labels, properties,
-  restrictions, attachments) and re-extraction
+  restrictions, attachments)
 * same version                              -> hierarchy/title/labels refreshed from the
   listing; moves are detected from ancestors
 * known page absent from the listing        -> checked individually: trashed, purged, no
@@ -14,6 +14,9 @@ ancestors, labels). Comparing that listing with the mirror drives everything els
 attachments changed since the last successful sync (via CQL). Each page is written in its
 own transaction, so one failing page is recorded in sync_runs and retried next run (its
 stored version is unchanged) without blocking the rest of the space.
+
+Sync stores what Confluence returns, including the storage-format body, and derives
+nothing from it: structure comes from the rendered bodies (``confex parse``).
 """
 
 from __future__ import annotations
@@ -41,7 +44,6 @@ from confluence_mirror.client import (
     cql_string,
 )
 from confluence_mirror.config import SyncSettings
-from confluence_mirror.extract import EXTRACTOR_VERSION, extract
 from confluence_mirror.logging_utils import redact
 
 log = logging.getLogger(__name__)
@@ -213,7 +215,6 @@ class SpaceSync:
             self.conn.rollback()
             report.counters.pages_listed += len(items)
             self._apply_listing(report, space["space_id"], items, known, full=scope.full)
-            repo.resolve_links(self.conn, space["space_id"])
             self.conn.commit()
         except Exception as exc:
             self.conn.rollback()
@@ -359,8 +360,6 @@ class SpaceSync:
         if not full and cursor is not None:
             self._refresh_changed_attachments(report, cursor, fetched)
 
-        resolved = repo.resolve_links(self.conn, space_id)
-        report.stats["links_resolved"] = resolved
         if not report.errors:
             repo.mark_space_synced(self.conn, space_id, run_id, full)
         self.conn.commit()
@@ -434,8 +433,6 @@ class SpaceSync:
             try:
                 if self._refresh_unchanged(item, listed, report):
                     to_refresh.append(page_id)
-                if prior.extractor_version != EXTRACTOR_VERSION:
-                    self._reextract_stored(page_id, prior.current_version, report)
             except Exception as exc:  # one page must not stop the space
                 self.conn.rollback()
                 report.counters.pages_failed += 1
@@ -557,7 +554,6 @@ class SpaceSync:
             self._write_properties(page_id, props, run_id)
             repo.replace_restrictions(self.conn, page_id, restrictions, run_id)
             repo.sync_attachments(self.conn, page_id, attachments, run_id)
-            self._extract(page_id, page["current_version"], content, report)
         self.conn.commit()
         report.counters.pages_fetched += 1
         report.counters.attachments_seen += len(attachments)
@@ -610,36 +606,6 @@ class SpaceSync:
                 except Exception as exc:
                     self.conn.rollback()
                     self._error(report, page_id, "metadata-refresh", exc)
-
-    def _extract(self, page_id: int, version: int, content: dict, report: SyncReport) -> None:
-        storage = models.content_row(content)["body_storage"]
-        space_key = (content.get("space") or {}).get("key")
-        try:
-            with self.conn.transaction():  # savepoint: source rows survive an extractor bug
-                result = extract(
-                    storage, page_id=page_id, space_key=space_key, base_url=self.client.base_url
-                )
-                repo.replace_extraction(self.conn, page_id, version, result, report.sync_run_id)
-        except Exception as exc:
-            self._error(report, page_id, "extract", exc)
-
-    def _reextract_stored(self, page_id: int, version: int, report: SyncReport) -> None:
-        """Re-derive extracted rows from the stored body (no network)."""
-        storage = repo.storage_body(self.conn, page_id, version)
-        try:
-            with self.conn.transaction():
-                result = extract(
-                    storage,
-                    page_id=page_id,
-                    space_key=report.space_key,
-                    base_url=self.client.base_url,
-                )
-                repo.replace_extraction(self.conn, page_id, version, result, report.sync_run_id)
-            self.conn.commit()
-            report.stats["reextracted"] = report.stats.get("reextracted", 0) + 1
-        except Exception as exc:
-            self.conn.rollback()
-            self._error(report, page_id, "extract", exc)
 
     def _refresh_unchanged(self, item: dict, listed: dict, report: SyncReport) -> bool:
         """Apply listing metadata to an unchanged page; True if its other resources need a
@@ -777,42 +743,3 @@ class SpaceSync:
             except Exception as exc:
                 self.conn.rollback()
                 self._error(report, page_id, "attachment-download", exc)
-
-
-def reextract(
-    conn: psycopg.Connection,
-    *,
-    base_url: str | None,
-    space_key: str | None = None,
-    page_ids: list[int] | None = None,
-    all_versions: bool = False,
-) -> dict[str, int]:
-    """Rebuild extracted.* from stored source bodies, without any network access."""
-    space_id = None
-    if space_key:
-        state = repo.space_state(conn, space_key)
-        if state is None:
-            raise ValueError(f"space {space_key} is not in the mirror")
-        space_id = state["space_id"]
-    targets = repo.page_versions_to_extract(conn, space_id, page_ids, all_versions)
-    conn.rollback()
-    done = failed = 0
-    for page_id, version, key in targets:
-        try:
-            with conn.transaction():
-                result = extract(
-                    repo.storage_body(conn, page_id, version),
-                    page_id=page_id,
-                    space_key=key,
-                    base_url=base_url,
-                )
-                repo.replace_extraction(conn, page_id, version, result, None)
-            conn.commit()
-            done += 1
-        except Exception as exc:
-            conn.rollback()
-            failed += 1
-            log.error("extraction failed for page %s v%s: %s", page_id, version, redact(str(exc)))
-    resolved = repo.resolve_links(conn, space_id)
-    conn.commit()
-    return {"extracted": done, "failed": failed, "links_resolved": resolved}

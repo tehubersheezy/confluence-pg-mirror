@@ -14,8 +14,8 @@ Guidance for coding agents and contributors working on this repository.
 3. **TLS stays verified.** No `verify=False` and no option to add one. Corporate CAs go
    through `ca_bundle` (added to certifi's roots) or `truststore`.
 4. **No company data in Git.** Fixtures are synthetic (`example.com` hosts, made-up keys and
-   IDs). Never commit a real storage body, URL, space key, username or token, even
-   "anonymised".
+   IDs). Never commit a real page body (storage or rendered), URL, space key, username or
+   token, even "anonymised".
 5. **No Docker or admin requirements**, for runtime and for tests alike.
 
 ## Architecture
@@ -24,13 +24,12 @@ Guidance for coding agents and contributors working on this repository.
 confex sync ──► sync.SpaceSync ──► client.ConfluenceClient   (HTTP, GET only)
                     │
                     ├──► models.py      (pure: API JSON → row dicts)
-                    ├──► repository.py  (all SQL; idempotent upserts)
-                    └──► extract/       (pure: storage XHTML → macros/tables/links)
-confex/ (CLI) ──► inspection.py ─┬─► repository.py           (mirror reads; parse/align writes)
+                    └──► repository.py  (all SQL; idempotent upserts)
+confex/ (CLI) ──► inspection.py ─┬─► repository.py           (mirror reads; parse writes)
               ├──► pipeline.py ───┼─► repository_pipeline.py  (pipeline.* and review.* SQL)
               ├──► review.py ─────┘
               └──► live.py ──► client.ConfluenceClient       (--data-source live; never persists)
-structure/   (pure: body → document artifact, table geometry, IDs)
+structure/   (pure: rendered HTML → document artifact, table geometry, links, IDs)
 extraction/  (pure: registry, classify, units, payload, rules, candidates, validation, privacy,
               templates: page-template summaries, requests and verdicts)
 extraction/provider.py  (the only module that talks to a model; imports the SDK lazily)
@@ -51,11 +50,18 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 - **Layering.** `models` and `extract` do no I/O and are unit-tested exhaustively.
   `repository` and `repository_pipeline` own every SQL statement. `sync` orchestrates and
   owns transactions. Keep SQL out of `sync.py` and HTTP out of `repository.py`.
+- **Rendered HTML only.** Everything derived reads `body.export_view` (falling back to
+  `body.view`). Storage format is still fetched and stored in `page_content.body_storage`,
+  but nothing parses it: it lacks what macros render (includes, page-properties reports,
+  Jira tables) and is not what readers see. Don't add storage parsing back; the
+  `REPRESENTATIONS` the parser accepts are `export_view` and `view`. Macros are recognised
+  by Confluence's `data-macro-name` marker, links by their URL (`structure/links.py`).
 - **Schemas separate provenance.** `source.*` holds what the API returned. `extracted.*`
-  holds what we derived, and must be rebuildable from `source` alone (`confex
-  reextract`). `sync.*` holds bookkeeping. Never write derived values into `source`; the one
-  exception is `page_content.extractor_version`/`extracted_at`, which records *that*
-  extraction happened.
+  holds what we derived, and must be rebuildable from `source` alone (`confex parse`).
+  `sync.*` holds bookkeeping. Never write derived values into `source`. The legacy
+  storage-extraction tables (`extracted.page_macros`, `macro_extractions`, `page_tables`,
+  `page_links`, `table_correspondence`; `page_content.extractor_version`/`extracted_at`)
+  remain in the schema but are no longer written.
 - **Discovery is listing-driven, not CQL-driven.** Each run lists the entire space with
   cheap metadata, then diffs against the mirror. This catches moves (which don't bump the
   version), deletions (which never appear in "modified since" queries) and restores, without
@@ -71,8 +77,8 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
   per-page request to the common path without a reason, and check
   `sync_runs.stats.http_requests` in tests when you touch it.
 - **Transactions.** Network calls for a page (or its batch) happen first, then one short
-  transaction per page writes it, so no transaction spans HTTP. Extraction runs in a savepoint inside that transaction:
-  an extractor bug loses the derived rows, never the source rows.
+  transaction per page writes it, so no transaction spans HTTP. Sync derives nothing, so a
+  parser bug can never cost source rows.
 - **Failure semantics.** A page-level failure is recorded in `sync_runs.errors` and the run
   ends `partial`. A failure before the listing (space fetch, listing) ends `failed`. The
   space cursor (`last_successful_sync_at`) advances only on `succeeded`. Because a failed
@@ -84,14 +90,9 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 - **The deletion guard** (`max_delete_fraction`) skips the deletion phase when an implausible
   share of pages vanishes from a listing, e.g. a PAT that lost permissions.
 - **Version awareness.** `page_versions`/`page_content` are keyed `(page_id,
-  version_number)`. All `extracted.*` rows carry the same key plus `element_path` and
-  `extractor_version`. Bump `EXTRACTOR_VERSION` (`extract/pipeline.py`) whenever extractor
-  output changes; the next sync re-extracts stored bodies whose recorded version differs.
-- **Storage parsing.** Storage format is undeclared-namespace XML with HTML entities. We wrap
-  it in a root declaring `ac`/`ri`/`at`, rewrite named entities to numeric ones, and parse
-  with lxml (`recover=True`, `resolve_entities=False`, `no_network=True`,
-  `strip_cdata=False`). Don't switch to an HTML parser: it lowercases and reshapes `ac:`
-  markup and mishandles CDATA.
+  version_number)`. Parse artifacts are keyed by a snapshot of one rendered body and the
+  `PARSER_VERSION`; bump it (`structure/document.py`) whenever artifact output changes, and
+  `confex parse` writes new artifacts instead of touching old ones.
 - **Migrations.** Plain SQL files, applied in order inside a transaction each, and
   checksummed. **Never edit a migration that has shipped**; add `NNNN+1_description.sql`.
   (Editing is acceptable only before the first release, as with 0001–0003 today.) Every
@@ -121,8 +122,9 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 ## Testing
 
 - `tests/unit/`: no database or network. Use `tests/fake_confluence.py` (an
-  `httpx.MockTransport` speaking DC-style pagination) and fixtures in
-  `tests/fixtures/storage/`.
+  `httpx.MockTransport` speaking DC-style pagination; pages take a `rendered=` HTML body
+  for export view) and fixtures in `tests/fixtures/render/` (rendered HTML; the storage
+  fixtures only exercise mirroring).
 - `tests/integration/`: real PostgreSQL. The fixture uses `CONFLUENCE_MIRROR_TEST_DSN`, or
   boots a throwaway cluster from `initdb`/`pg_ctl` on a private Unix socket. CI sets
   `CPM_REQUIRE_POSTGRES=1` so missing Postgres fails instead of skipping.

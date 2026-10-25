@@ -214,13 +214,12 @@ class KnownPage:
     title: str
     is_deleted: bool
     has_content: bool
-    extractor_version: str | None
 
 
 def known_pages(conn: psycopg.Connection, space_id: int, content_type: str) -> dict[int, KnownPage]:
     cur = conn.execute(
         "SELECT p.page_id, p.current_version, p.parent_id, p.title, p.is_deleted, "
-        "c.page_id IS NOT NULL, c.extractor_version "
+        "c.page_id IS NOT NULL "
         "FROM source.pages p LEFT JOIN source.page_content c "
         "  ON c.page_id = p.page_id AND c.version_number = p.current_version "
         "WHERE p.space_id = %s AND p.content_type = %s",
@@ -493,44 +492,6 @@ def page_versions_to_extract(
     return cur.fetchall()
 
 
-def storage_body(conn, page_id: int, version: int) -> str | None:
-    row = conn.execute(
-        "SELECT body_storage FROM source.page_content WHERE page_id = %s AND version_number = %s",
-        (page_id, version),
-    ).fetchone()
-    return row[0] if row else None
-
-
-def replace_extraction(conn, page_id: int, version: int, result: Any, run_id: int | None) -> None:
-    """Replace all derived rows for one (page, version) with a fresh extraction result."""
-    key = {"page_id": page_id, "version_number": version}
-    for table in ("page_links", "page_tables", "macro_extractions", "page_macros"):
-        conn.execute(
-            sql.SQL("DELETE FROM {} WHERE page_id = %s AND version_number = %s").format(
-                sql.Identifier("extracted", table)
-            ),
-            (page_id, version),
-        )
-    ev = result.extractor_version
-    for macro in result.macros:
-        _insert(
-            conn,
-            "extracted.page_macros",
-            {**key, **macro, "extractor_version": ev, "sync_run_id": run_id},
-        )
-    for item in result.macro_extractions:
-        _insert(conn, "extracted.macro_extractions", {**key, **item, "extractor_version": ev})
-    for table in result.tables:
-        _insert(conn, "extracted.page_tables", {**key, **table, "extractor_version": ev})
-    for link in result.links:
-        _insert(conn, "extracted.page_links", {**key, **link, "extractor_version": ev})
-    conn.execute(
-        "UPDATE source.page_content SET extractor_version = %s, extracted_at = now() "
-        "WHERE page_id = %s AND version_number = %s",
-        (ev, page_id, version),
-    )
-
-
 def _insert(conn, table: str, row: dict) -> None:
     schema, name = table.split(".")
     columns = list(row)
@@ -542,22 +503,6 @@ def _insert(conn, table: str, row: dict) -> None:
         ),
         [_adapt(c, row[c]) for c in columns],
     )
-
-
-def resolve_links(conn, space_id: int | None = None) -> int:
-    """Fill target_page_id for links that name a page by (space key, title)."""
-    cur = conn.execute(
-        "UPDATE extracted.page_links l SET target_page_id = p.page_id "
-        "FROM source.pages p JOIN source.spaces s ON s.space_id = p.space_id "
-        "WHERE l.target_page_id IS NULL AND l.target_title IS NOT NULL "
-        "AND l.link_type IN ('page', 'blogpost', 'include') "
-        "AND p.title = l.target_title AND s.space_key = l.target_space_key "
-        "AND NOT p.is_deleted "
-        "AND (%(space)s::bigint IS NULL OR l.page_id IN "
-        "     (SELECT page_id FROM source.pages WHERE space_id = %(space)s))",
-        {"space": space_id},
-    )
-    return cur.rowcount
 
 
 # -- structural parse artifacts (confex) ----------------------------------------------------
@@ -585,7 +530,7 @@ def stored_bodies(conn, page_id: int, version: int | None = None) -> dict | None
 
 def content_versions(conn, page_id: int) -> list[dict]:
     cur = conn.execute(
-        "SELECT version_number, body_storage IS NOT NULL, body_export_view IS NOT NULL, "
+        "SELECT version_number, body_export_view IS NOT NULL, "
         "body_view IS NOT NULL, fetched_at FROM source.page_content WHERE page_id = %s "
         "ORDER BY version_number",
         (page_id,),
@@ -595,7 +540,7 @@ def content_versions(conn, page_id: int) -> list[dict]:
             "version_number": v,
             "representations": [
                 name
-                for name, present in zip(("storage", "export_view", "view"), flags, strict=True)
+                for name, present in zip(("export_view", "view"), flags, strict=True)
                 if present
             ],
             "fetched_at": fetched,
@@ -683,7 +628,8 @@ def load_artifact(conn, artifact_id: str) -> dict | None:
 def table_occurrence(conn, table_id: str) -> dict | None:
     cur = conn.execute(
         "SELECT table_id, artifact_id, page_id, version_number, representation, ordinal "
-        "FROM extracted.table_occurrences WHERE table_id = %s",
+        "FROM extracted.table_occurrences WHERE table_id = %s "
+        "AND representation IN ('export_view', 'view')",
         (table_id,),
     )
     return _one_dict(cur)
@@ -700,7 +646,7 @@ def list_table_occurrences(
         "FROM extracted.table_occurrences t "
         "JOIN source.pages p ON p.page_id = t.page_id AND p.current_version = t.version_number "
         "JOIN source.spaces s ON s.space_id = p.space_id "
-        "WHERE NOT p.is_deleted "
+        "WHERE NOT p.is_deleted AND t.representation IN ('export_view', 'view') "
         "AND (%(space)s::bigint IS NULL OR p.space_id = %(space)s) "
         "AND (%(page)s::bigint IS NULL OR t.page_id = %(page)s) "
         "AND (%(rep)s::text IS NULL OR t.representation = %(rep)s) "
@@ -736,7 +682,7 @@ def list_spaces(conn) -> list[dict]:
         "(SELECT count(*) FROM extracted.table_occurrences t JOIN source.pages p "
         " ON p.page_id = t.page_id AND p.current_version = t.version_number "
         " WHERE p.space_id = s.space_id AND NOT p.is_deleted "
-        " AND t.representation = 'storage') AS parsed_storage_tables "
+        " AND t.representation = 'export_view') AS parsed_tables "
         "FROM source.spaces s ORDER BY s.space_key"
     )
     return _dicts(cur)
@@ -837,28 +783,22 @@ def page_subtree(conn, root_id: int, max_depth: int) -> list[dict]:
     return _dicts(cur)
 
 
-def page_summary_counts(conn, page_id: int, version: int) -> dict:
+def page_summary_counts(conn, page_id: int) -> dict:
     row = conn.execute(
         "SELECT "
-        "(SELECT count(*) FROM extracted.page_macros WHERE page_id = %(p)s "
-        " AND version_number = %(v)s), "
-        "(SELECT count(*) FROM extracted.page_links WHERE page_id = %(p)s "
-        " AND version_number = %(v)s), "
         "(SELECT count(*) FROM source.attachments WHERE page_id = %(p)s AND NOT is_deleted), "
         "(SELECT count(*) FROM source.access_restrictions WHERE page_id = %(p)s), "
         "(SELECT count(*) FROM source.pages WHERE parent_id = %(p)s AND NOT is_deleted)",
-        {"p": page_id, "v": version},
+        {"p": page_id},
     ).fetchone()
     labels = conn.execute(
         "SELECT prefix, name FROM source.page_labels WHERE page_id = %s ORDER BY prefix, name",
         (page_id,),
     ).fetchall()
     return {
-        "macros": row[0],
-        "links": row[1],
-        "attachments": row[2],
-        "direct_restrictions": row[3],
-        "children": row[4],
+        "attachments": row[0],
+        "direct_restrictions": row[1],
+        "children": row[2],
         "labels": [f"{p}:{n}" if p != "global" else n for p, n in labels],
     }
 
@@ -867,6 +807,7 @@ def page_artifacts(conn, page_id: int, version: int) -> list[dict]:
     cur = conn.execute(
         "SELECT artifact_id, snapshot_id, representation, status, table_count, parser_version, "
         "parsed_at FROM extracted.parse_artifacts WHERE page_id = %s AND version_number = %s "
+        "AND representation IN ('export_view', 'view') "
         "ORDER BY representation, parsed_at",
         (page_id, version),
     )
@@ -927,41 +868,31 @@ def version_metadata(conn, page_id: int, version: int) -> dict | None:
     return _one_dict(cur)
 
 
-def page_macro_rows(conn, page_id: int, version: int, name: str | None) -> list[dict]:
+def page_by_title(conn, space_key: str, title: str) -> dict | None:
+    row = conn.execute(
+        "SELECT p.page_id FROM source.pages p JOIN source.spaces s ON s.space_id = p.space_id "
+        "WHERE s.space_key = %s AND p.title = %s ORDER BY p.is_deleted, p.page_id LIMIT 1",
+        (space_key, title),
+    ).fetchone()
+    return get_page(conn, row[0]) if row else None
+
+
+def inbound_links(conn, page_id: int, space_key: str, title: str) -> list[dict]:
+    """Pages whose parsed rendered current version links to this page, by ID or title."""
     cur = conn.execute(
-        "SELECT macro_index, macro_name, macro_id, parent_macro_index, depth, element_path, "
-        "parameters, body_type, body_text FROM extracted.page_macros "
-        "WHERE page_id = %s AND version_number = %s AND (%s::text IS NULL OR macro_name = %s) "
-        "ORDER BY macro_index",
-        (page_id, version, name, name),
-    )
-    return _dicts(cur)
-
-
-def outbound_links(conn, page_id: int, version: int) -> list[dict]:
-    cur = conn.execute(
-        "SELECT l.link_index, l.link_type, l.source_element, l.element_path, l.target_page_id, "
-        "l.target_space_key, l.target_title, l.target_filename, l.target_user_key, "
-        "l.target_url, l.anchor, l.link_text, "
-        "(tp.page_id IS NOT NULL AND NOT tp.is_deleted) AS target_in_mirror "
-        "FROM extracted.page_links l LEFT JOIN source.pages tp ON tp.page_id = l.target_page_id "
-        "WHERE l.page_id = %s AND l.version_number = %s ORDER BY l.link_index",
-        (page_id, version),
-    )
-    return _dicts(cur)
-
-
-def inbound_links(conn, page_id: int) -> list[dict]:
-    """Links to the page from the current version of other mirrored pages."""
-    cur = conn.execute(
-        "SELECT l.page_id AS source_page_id, p.title AS source_title, s.space_key, "
-        "l.link_index, l.link_type, l.anchor, l.link_text "
-        "FROM extracted.page_links l "
-        "JOIN source.pages p ON p.page_id = l.page_id AND p.current_version = l.version_number "
+        "SELECT DISTINCT ON (a.page_id) a.page_id AS source_page_id, p.title AS source_title, "
+        "s.space_key, a.representation "
+        "FROM extracted.parse_artifacts a "
+        "JOIN source.pages p ON p.page_id = a.page_id AND p.current_version = a.version_number "
         "JOIN source.spaces s ON s.space_id = p.space_id "
-        "WHERE l.target_page_id = %s AND NOT p.is_deleted AND l.page_id <> %s "
-        "ORDER BY l.page_id, l.link_index",
-        (page_id, page_id),
+        "WHERE NOT p.is_deleted AND a.page_id <> %(id)s "
+        "AND a.representation IN ('export_view', 'view') "
+        "AND (a.document->'links' @> jsonb_build_array("
+        "       jsonb_build_object('kind', 'page', 'page_id', %(id)s::bigint)) "
+        "  OR a.document->'links' @> jsonb_build_array(jsonb_build_object("
+        "       'kind', 'page', 'space_key', %(key)s::text, 'title', %(title)s::text))) "
+        "ORDER BY a.page_id, a.representation",
+        {"id": page_id, "key": space_key, "title": title},
     )
     return _dicts(cur)
 
@@ -1001,7 +932,8 @@ def search_pages(
         "AND (%(label)s::text IS NULL OR EXISTS (SELECT 1 FROM source.page_labels l "
         "     WHERE l.page_id = p.page_id AND l.name = %(label)s)) "
         "AND (NOT %(tables)s OR EXISTS (SELECT 1 FROM extracted.table_occurrences t "
-        "     WHERE t.page_id = p.page_id AND t.version_number = p.current_version)) "
+        "     WHERE t.page_id = p.page_id AND t.version_number = p.current_version "
+        "     AND t.representation IN ('export_view', 'view'))) "
         "ORDER BY lower(p.title), p.page_id LIMIT %(limit)s",
         {
             "space": space_id,
@@ -1024,7 +956,9 @@ def search_text(
         "FROM extracted.search_blocks b "
         "JOIN source.pages p ON p.page_id = b.page_id AND p.current_version = b.version_number "
         "JOIN source.spaces s ON s.space_id = p.space_id "
+        "JOIN extracted.parse_artifacts a ON a.artifact_id = b.artifact_id "
         "WHERE NOT p.is_deleted AND b.text ILIKE %(text)s "
+        "AND a.representation IN ('export_view', 'view') "
         "AND (%(space)s::bigint IS NULL OR p.space_id = %(space)s) "
         "AND (%(ids)s::bigint[] IS NULL OR b.page_id = ANY(%(ids)s)) "
         "ORDER BY lower(p.title), b.page_id, b.block_id LIMIT %(limit)s",
@@ -1038,13 +972,15 @@ def search_projection_state(conn, space_id: int | None) -> dict:
         "SELECT count(DISTINCT p.page_id), count(DISTINCT b.page_id), max(b.indexed_at) "
         "FROM source.pages p LEFT JOIN extracted.search_blocks b "
         "ON b.page_id = p.page_id AND b.version_number = p.current_version "
+        "AND b.artifact_id IN (SELECT artifact_id FROM extracted.parse_artifacts "
+        "  WHERE representation IN ('export_view', 'view')) "
         "WHERE NOT p.is_deleted AND (%s::bigint IS NULL OR p.space_id = %s)",
         (space_id, space_id),
     ).fetchone()
     return {"pages": row[0], "pages_indexed": row[1], "indexed_at": row[2]}
 
 
-# -- correspondence -------------------------------------------------------------------------
+# -- artifacts by representation ---------------------------------------------------------
 
 
 def latest_artifacts(conn, page_id: int, version: int) -> dict[str, dict]:
@@ -1052,73 +988,8 @@ def latest_artifacts(conn, page_id: int, version: int) -> dict[str, dict]:
     cur = conn.execute(
         "SELECT DISTINCT ON (representation) representation, document "
         "FROM extracted.parse_artifacts WHERE page_id = %s AND version_number = %s "
+        "AND representation IN ('export_view', 'view') "
         "ORDER BY representation, parsed_at DESC",
         (page_id, version),
     )
     return {rep: doc for rep, doc in cur.fetchall()}
-
-
-def insert_correspondence(conn, rows: list[dict]) -> int:
-    added = 0
-    for row in rows:
-        data = {k: v for k, v in row.items() if k not in ("left_ordinal", "right_ordinal")}
-        cur = conn.execute(
-            sql.SQL(
-                "INSERT INTO extracted.table_correspondence ({c}) VALUES ({v}) "
-                "ON CONFLICT (correspondence_id) DO NOTHING"
-            ).format(
-                c=sql.SQL(", ").join(map(sql.Identifier, data)),
-                v=sql.SQL(", ").join(sql.Placeholder() * len(data)),
-            ),
-            [_adapt(k, v) for k, v in data.items()],
-        )
-        added += cur.rowcount
-    return added
-
-
-def correspondence_rows(conn, page_id: int, version: int, artifact_ids: list[str]) -> list[dict]:
-    cur = conn.execute(
-        "SELECT c.*, d.decision, d.actor AS decided_by, d.reason AS decision_reason, "
-        "d.decided_at FROM extracted.table_correspondence c "
-        "LEFT JOIN LATERAL (SELECT decision, actor, reason, decided_at "
-        "  FROM review.correspondence_decisions x WHERE x.correspondence_id = c.correspondence_id "
-        "  ORDER BY decided_at DESC, decision_id DESC LIMIT 1) d ON true "
-        "WHERE c.page_id = %s AND c.version_number = %s "
-        "AND c.left_artifact_id = ANY(%s) AND c.right_artifact_id = ANY(%s) "
-        "ORDER BY c.left_representation, c.right_representation, c.correspondence_id",
-        (page_id, version, artifact_ids, artifact_ids),
-    )
-    return _dicts(cur)
-
-
-def correspondence_for_table(conn, table_id: str) -> list[dict]:
-    cur = conn.execute(
-        "SELECT c.correspondence_id, c.left_table_id, c.right_table_id, c.left_representation, "
-        "c.right_representation, c.state, c.method, c.evidence, d.decision "
-        "FROM extracted.table_correspondence c "
-        "LEFT JOIN LATERAL (SELECT decision FROM review.correspondence_decisions x "
-        "  WHERE x.correspondence_id = c.correspondence_id "
-        "  ORDER BY decided_at DESC, decision_id DESC LIMIT 1) d ON true "
-        "WHERE c.left_table_id = %s OR c.right_table_id = %s ORDER BY c.correspondence_id",
-        (table_id, table_id),
-    )
-    return _dicts(cur)
-
-
-def get_correspondence(conn, correspondence_id: str) -> dict | None:
-    cur = conn.execute(
-        "SELECT * FROM extracted.table_correspondence WHERE correspondence_id = %s",
-        (correspondence_id,),
-    )
-    return _one_dict(cur)
-
-
-def add_correspondence_decision(
-    conn, correspondence_id: str, decision: str, actor: str, reason: str
-) -> int:
-    row = conn.execute(
-        "INSERT INTO review.correspondence_decisions (correspondence_id, decision, actor, reason) "
-        "VALUES (%s, %s, %s, %s) RETURNING decision_id",
-        (correspondence_id, decision, actor, reason),
-    ).fetchone()
-    return row[0]

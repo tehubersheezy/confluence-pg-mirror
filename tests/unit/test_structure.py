@@ -12,10 +12,10 @@ from ..conftest import FIXTURES
 
 @pytest.fixture
 def geometry() -> str:
-    return (FIXTURES / "storage" / "geometry_page.xml").read_text(encoding="utf-8")
+    return (FIXTURES / "render" / "geometry_page.html").read_text(encoding="utf-8")
 
 
-def parse(body, representation="storage", **kw):
+def parse(body, representation="export_view", **kw):
     return parse_document(body, page_id=7, version=1, representation=representation, **kw)
 
 
@@ -102,15 +102,11 @@ def test_malformed_geometry_stays_inspectable(geometry):
 
 def test_code_macro_html_is_not_a_table(geometry):
     doc = parse(geometry)
-    assert len(doc["tables"]) == 6
-    # Even unescaped markup inside a plain-text body stays literal.
-    body = (
-        '<ac:structured-macro ac:name="code"><ac:plain-text-body>'
-        "<table><tr><td>x</td></tr></table></ac:plain-text-body></ac:structured-macro>"
-    )
-    literal = parse(body)
-    assert literal["tables"] == []
-    assert codes(literal["diagnostics"]) == ["LITERAL_TABLE_MARKUP"]
+    assert len(doc["tables"]) == 6  # the escaped table in the code block is text
+    code = next(n for n in doc["nodes"] if n["kind"] == "macro")
+    assert code["name"] == "code"
+    text = next(n["text"] for n in doc["nodes"] if n["kind"] == "code")
+    assert text == "<table><tr><td>not a table</td></tr></table>"
 
 
 def test_context_and_unicode_evidence(geometry):
@@ -135,7 +131,7 @@ def test_identities_are_deterministic_and_content_bound(geometry):
     assert changed["artifact_id"] != a["artifact_id"]
     assert changed["tables"][0]["table_id"] != a["tables"][0]["table_id"]
     assert all(t["table_id"].startswith("tbl_") for t in a["tables"])
-    other_rep = parse(geometry, representation="export_view")
+    other_rep = parse(geometry, representation="view")
     assert other_rep["tables"][0]["table_id"] != a["tables"][0]["table_id"]
 
 
@@ -152,6 +148,55 @@ def test_export_view_uses_html_adapter():
     assert doc["blocks"][cell["content"][0]["block_id"]]["evidence_text"] == "1\n2"
     # The table-wrap div is climbed, so the following paragraph is found.
     assert doc["blocks"][t["context"]["following"]["block_id"]]["evidence_text"] == "after"
+
+
+def test_rendered_macros_scope_their_content():
+    body = (
+        '<div class="conf-macro output-block" data-macro-name="expand"><h3>Hidden</h3>'
+        "<table><tr><th>K</th></tr><tr><td>v</td></tr></table></div>"
+        '<p>A <span class="status-macro conf-macro output-inline" data-macro-name="status">'
+        "DONE</span> marker.</p>"
+    )
+    doc = parse(body)
+    macro = next(n for n in doc["nodes"] if n["kind"] == "macro")
+    assert macro["name"] == "expand"
+    assert doc["tables"][0]["containers"][0] == {
+        "kind": "macro",
+        "id": macro["id"],
+        "name": "expand",
+    }
+    # Inline macros are text, not containers.
+    assert [n["text"] for n in doc["nodes"] if n["kind"] == "paragraph"] == ["A DONE marker."]
+
+
+def test_links_are_classified_by_url():
+    body = (
+        '<p><a href="/pages/viewpage.action?pageId=42">by id</a>'
+        '<a href="https://c.example.com/wiki/display/OPS/Run+Book#Steps">by title</a>'
+        '<a href="/spaces/OPS/pages/77/Some+Title">new style</a>'
+        '<a href="/download/attachments/42/a%20b.pdf?api=v2">file</a>'
+        '<a href="/display/~alice">Alice</a><a href="#top">top</a>'
+        '<a href="mailto:x@example.com">mail</a><a href="https://example.org/">ext</a></p>'
+    )
+    links = parse(body)["links"]
+    assert [(link["kind"], link["text"]) for link in links] == [
+        ("page", "by id"),
+        ("page", "by title"),
+        ("page", "new style"),
+        ("attachment", "file"),
+        ("user", "Alice"),
+        ("anchor", "top"),
+        ("email", "mail"),
+        ("external", "ext"),
+    ]
+    assert links[0]["page_id"] == 42
+    assert (links[1]["space_key"], links[1]["title"], links[1]["anchor"]) == (
+        "OPS",
+        "Run Book",
+        "Steps",
+    )
+    assert links[2]["page_id"] == 77 and links[3]["filename"] == "a b.pdf"
+    assert links[4]["username"] == "alice" and links[7]["host"] == "example.org"
 
 
 def test_recovery_is_reported():

@@ -18,7 +18,10 @@ def fake(rich_storage):
     f = FakeConfluence()
     demo_space(f, rich_storage)
     geometry = (FIXTURES / "storage" / "geometry_page.xml").read_text(encoding="utf-8")
-    f.add_page(1006, "DEMO", "Servers", 1002, geometry, position=5, labels=["inventory"])
+    rendered = (FIXTURES / "render" / "geometry_page.html").read_text(encoding="utf-8")
+    f.add_page(
+        1006, "DEMO", "Servers", 1002, geometry, rendered=rendered, position=5, labels=["inventory"]
+    )
     return f
 
 
@@ -61,19 +64,44 @@ def test_page_metadata_commands(env, conn, capsys):
     assert e["data"]["attachments"][0]["title"] == "diagram.png"
     code, e = run(capsys, "pages", "versions", "1001")
     assert e["data"]["versions"][0]["body_stored"] is True
-    code, e = run(capsys, "pages", "macros", "1001", "--name", "info")
-    assert [m["macro_name"] for m in e["data"]["macros"]] == ["info"]
+    code, e = run(capsys, "pages", "show", "1001")
+    assert e["data"]["macros"] is None and e["data"]["links"] is None  # not parsed yet
+
+    # Links come from the rendered page; inbound links need parsed pages.
+    assert confex.main(["parse", "--space", "DEMO"]) == 0
+    capsys.readouterr()
     code, e = run(capsys, "pages", "links", "1002", "--direction", "both")
-    assert e["data"]["outbound"][0]["target_page_id"] == 1001
+    assert e["data"]["representation"] == "export_view"
+    out = e["data"]["outbound"][0]
+    assert (out["kind"], out["target_page_id"], out["resolution"]) == ("page", 1001, "resolved")
     assert {x["source_page_id"] for x in e["data"]["inbound"]} == {1001}
     assert "not a complete backlink index" in e["data"]["inbound_coverage"]
+    code, e = run(capsys, "pages", "links", "1001")
+    links = e["data"]["outbound"]
+    assert [x["kind"] for x in links] == [
+        "page",
+        "page",
+        "page",
+        "page",
+        "external",
+        "anchor",
+        "user",
+        "user",
+        "attachment",
+    ]
+    assert [x.get("target_page_id") for x in links[:4]] == [1002, None, 1003, 1001]
+    assert links[1]["resolution"] == "unresolved"  # space OTHER is not in this mirror
+    code, e = run(capsys, "pages", "show", "1001")
+    assert e["data"]["macros"] == 4 and e["data"]["links"] == 9  # info, code, details, include
+    code, e = run(capsys, "pages", "macros", "1001")
+    assert code == inspection.EXIT_USAGE  # removed with the storage extractor
 
     assert requests_made(env) == before  # mirror commands make no requests
 
 
 def test_read_sections_and_raw(env, conn, capsys):
     sync(conn, env)
-    code, e = run(capsys, "pages", "read", "1006", "--representation", "storage")
+    code, e = run(capsys, "pages", "read", "1006", "--representation", "export_view")
     blocks = e["data"]["blocks"]
     kinds = [b["kind"] for b in blocks]
     assert kinds[:4] == ["heading", "heading", "paragraph", "table"]
@@ -81,35 +109,49 @@ def test_read_sections_and_raw(env, conn, capsys):
     assert not any(b.get("text") == "see below" for b in blocks)
     groups = next(b for b in blocks if b.get("text") == "Groups")
     code, e = run(
-        capsys, "pages", "read", "1006", "--representation", "storage", "--section-id", groups["id"]
+        capsys,
+        "pages",
+        "read",
+        "1006",
+        "--representation",
+        "export_view",
+        "--section-id",
+        groups["id"],
     )
     section = e["data"]["blocks"]
     assert section[0]["text"] == "Groups" and section[1]["kind"] == "table"
     assert all(b.get("text") != "Servers" for b in section)
 
-    code, e = run(capsys, "pages", "read", "1001", "--representation", "storage")
+    code, e = run(capsys, "pages", "read", "1001", "--representation", "export_view")
     preamble = e["data"]["preamble_section_id"]
     code, e = run(
-        capsys, "pages", "read", "1001", "--representation", "storage", "--section-id", preamble
+        capsys, "pages", "read", "1001", "--representation", "export_view", "--section-id", preamble
     )
     assert e["data"]["blocks"] == []  # the root page starts with a heading
 
-    code, e = run(capsys, "pages", "read", "1003", "--mode", "raw", "--representation", "storage")
-    assert e["data"]["body"].startswith("<table>")
+    code, e = run(
+        capsys, "pages", "read", "1003", "--mode", "raw", "--representation", "export_view"
+    )
+    assert e["data"]["body"].startswith("<div class='export'><table>")
 
-    assert confex.main(["pages", "read", "1006", "--representation", "storage"]) == 0
+    assert confex.main(["pages", "read", "1006", "--representation", "export_view"]) == 0
     text = capsys.readouterr().out
     assert "# Inventory" in text and "[table 1006:t01 3x3]" in text
 
 
 def test_diff_between_versions(env, conn, capsys):
     sync(conn, env)
-    body = (
+    rendered = (
         env.pages[1006]
-        .body.replace("db02", "db09")
-        .replace("<h2>Groups</h2>", "<h2>Groups</h2><p>New note</p>")
+        .rendered.replace("db02", "db09")
+        .replace('<h2 id="Groups">Groups</h2>', '<h2 id="Groups">Groups</h2><p>New note</p>')
     )
-    env.edit(1006, body=body, title="Servers (edited)")
+    env.edit(
+        1006,
+        body=env.pages[1006].body.replace("db02", "db09"),
+        rendered=rendered,
+        title="Servers (edited)",
+    )
     sync(conn, env)
     code, e = run(capsys, "pages", "diff", "1006", "--from-version", "1", "--to-version", "2")
     assert code == 0
@@ -132,11 +174,13 @@ def test_same_version_body_change_is_archived(env, conn, capsys):
         "SELECT representation, body FROM source.superseded_bodies WHERE page_id = 1004 "
         "ORDER BY representation",
     )
-    assert ("storage", old) in archived
+    assert ("storage", old) in archived  # storage is still mirrored, just never parsed
+    old_render = f"<div class='export'>{old}</div>"
+    assert ("export_view", old_render) in archived
     # The old capture is still addressable by its snapshot ID.
     from confluence_mirror.structure import artifact_identity
 
-    snap = artifact_identity(1004, 1, "storage", old)["snapshot_id"]
+    snap = artifact_identity(1004, 1, "export_view", old_render)["snapshot_id"]
     code, e = run(capsys, "pages", "diff", "1004", "--from-snapshot", snap, "--to-version", "1")
     assert code == 0 and e["data"]["blocks"]["added"] == ["Rendered differently"]
 
@@ -234,3 +278,35 @@ def test_sync_command_scopes(env, conn, capsys):
     code, e = run(capsys, "sync", "--space", "DEMO", "--changed-only")
     assert e["data"]["mode"] == "incremental" and e["data"]["pages_unchanged"] == 6
     assert {r.method for r in env.requests} == {"GET"}
+
+
+def test_old_storage_parse_results_are_ignored(env, conn, capsys):
+    """Artifacts parsed from storage before it was dropped stay as history, unseen."""
+    sync(conn, env)
+    assert confex.main(["parse", "--page", "1003"]) == 0
+    capsys.readouterr()
+    rendered = scalar(conn, "SELECT artifact_id FROM extracted.parse_artifacts")
+    # Forge a leftover storage artifact by copying the rendered one under another key.
+    conn.execute(
+        "INSERT INTO extracted.parse_artifacts (artifact_id, snapshot_id, instance_id, page_id, "
+        "version_number, representation, body_sha256, parser_version, config_fingerprint, "
+        "status, table_count, document, diagnostics) "
+        "SELECT 'doc_old', 'snap_old', instance_id, page_id, version_number, 'storage', "
+        "body_sha256, 'structure.2', config_fingerprint, status, table_count, document, "
+        "diagnostics FROM extracted.parse_artifacts WHERE artifact_id = %s",
+        (rendered,),
+    )
+    conn.execute(
+        "INSERT INTO extracted.table_occurrences (table_id, artifact_id, page_id, "
+        "version_number, representation, ordinal, depth, element_path, row_count, "
+        "column_count, geometry_status, extraction_eligible) "
+        "VALUES ('tbl_old', 'doc_old', 1003, 1, 'storage', 1, 0, '/table[1]', 2, 2, "
+        "'valid', true)"
+    )
+    conn.commit()
+    code, e = run(capsys, "tables", "list", "--page", "1003")
+    assert [t["representation"] for t in e["data"]] == ["export_view"]
+    code, e = run(capsys, "tables", "show", "tbl_old")
+    assert code == inspection.EXIT_NOT_FOUND
+    code, e = run(capsys, "pages", "show", "1003")
+    assert e["data"]["known_tables"] == {"export_view": 1}

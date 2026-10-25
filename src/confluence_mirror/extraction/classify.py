@@ -275,7 +275,7 @@ def classify_table(
             method="structural_check",
             reason=f"geometry is {table['geometry_status']}; automatic extraction is blocked",
         )
-    if artifact["representation"] not in ("storage", "export_view", "view"):
+    if artifact["representation"] not in ("export_view", "view"):
         raise ValueError(artifact["representation"])
 
     if explicit_profile:

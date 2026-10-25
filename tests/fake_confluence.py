@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import unquote, urlencode, urlsplit
 
 import httpx
@@ -50,6 +51,9 @@ class FakePage:
     update_groups: list[str] = field(default_factory=list)
     modified: datetime = EPOCH
     position: int | None = None
+    # Rendered HTML for export_view and view; defaults to the body wrapped in a div, which
+    # suits bodies that are already plain HTML.
+    rendered: str | None = None
 
 
 class FakeConfluence:
@@ -111,12 +115,21 @@ class FakeConfluence:
         self.clock = max(self.clock + timedelta(minutes=5), datetime.now(UTC))
         return self.clock
 
-    def edit(self, page_id: int, *, body: str | None = None, title: str | None = None) -> None:
+    def edit(
+        self,
+        page_id: int,
+        *,
+        body: str | None = None,
+        title: str | None = None,
+        rendered: str | None = None,
+    ) -> None:
         page = self.pages[page_id]
         page.version += 1
         page.modified = self.tick()
         if body is not None:
             page.body = body
+        if rendered is not None:
+            page.rendered = rendered
         if title is not None:
             page.title = title
 
@@ -212,8 +225,8 @@ class FakeConfluence:
         }
         bodies = {
             "storage": page.body,
-            "view": f"<div class='view'>{page.body}</div>",
-            "export_view": f"<div class='export'>{page.body}</div>",
+            "view": f"<div class='view'>{page.rendered or page.body}</div>",
+            "export_view": f"<div class='export'>{page.rendered or page.body}</div>",
         }
         wanted = {r for r in bodies if f"body.{r}" in expand.split(",")}
         if wanted:
@@ -495,8 +508,17 @@ class FakeConfluence:
         return httpx.Response(404, json={"message": f"unhandled {path}"})
 
 
-def demo_space(fake: FakeConfluence, storage: str) -> None:
-    """A small synthetic space: root -> (child -> grandchild, sibling)."""
+RENDERED = Path(__file__).parent / "fixtures" / "render"
+
+
+def demo_space(fake: FakeConfluence, storage: str, rendered: str | None = None) -> None:
+    """A small synthetic space: root -> (child -> grandchild, sibling).
+
+    The root page's rendered HTML is ``rendered``; for the rich storage fixture it defaults
+    to its rendered counterpart, otherwise to the storage body itself.
+    """
+    if rendered is None and "m-info-1" in storage:
+        rendered = (RENDERED / "rich_page.html").read_text(encoding="utf-8")
     fake.add_space(
         "DEMO", 98001, "Demo Space", homepage=1001, properties={"team": {"name": "Synthetic"}}
     )
@@ -511,6 +533,7 @@ def demo_space(fake: FakeConfluence, storage: str) -> None:
         properties={"owner": {"team": "docs"}},
         attachments=[FakeAttachment("att5001", "diagram.png", "image/png", b"\x89PNG")],
         update_groups=["doc-editors"],
+        rendered=rendered,
     )
     fake.add_page(
         1002,
@@ -518,6 +541,7 @@ def demo_space(fake: FakeConfluence, storage: str) -> None:
         "Child Page",
         1001,
         '<p>Back to <ac:link><ri:page ri:content-title="Root Page"/></ac:link></p>',
+        rendered='<p>Back to <a href="/display/DEMO/Root+Page">Root Page</a></p>',
         labels=["child"],
         read_users=["alice"],
         read_groups=["team-a"],
@@ -539,5 +563,8 @@ def demo_space(fake: FakeConfluence, storage: str) -> None:
         1001,
         '<ac:structured-macro ac:name="excerpt" ac:schema-version="1">'
         "<ac:rich-text-body><p>Reusable</p></ac:rich-text-body></ac:structured-macro>",
+        rendered=(
+            '<div class="conf-macro output-block" data-macro-name="excerpt"><p>Reusable</p></div>'
+        ),
     )
     fake.add_page(2001, "OTHER", "Elsewhere", None, "<p>Other space</p>")

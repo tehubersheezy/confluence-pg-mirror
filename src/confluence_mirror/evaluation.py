@@ -50,7 +50,7 @@ def run_case(
     policy: PrivacyPolicy | None = None,
 ) -> dict:
     policy = policy or PrivacyPolicy()
-    artifact = parse_document(case["body"], page_id=0, version=1, representation="storage")
+    artifact = parse_document(case["body"], page_id=0, version=1, representation="export_view")
     table = artifact["tables"][case.get("table_ordinal", 1) - 1]
     c = classify_table(table, artifact, registry, explicit_profile=case.get("profile"))
     expected = case["expected"]

@@ -28,9 +28,9 @@ prebuilt `pydantic-core`/`jiter` wheels for macOS, so no compiler is needed. Onl
 | Milestone | Delivered | Not yet / limits |
 |---|---|---|
 | **M0** contract | This document: schema mapping, identity recipe, config groups, output envelope `confex.cli.v1`, synthetic fixtures | Lockfile: the repo pins ranges in `pyproject.toml`. Generate a hashed `requirements.lock` for your approved interpreter with `pip-compile --generate-hashes`. |
-| **M1** mirror and navigation | `db status/migrate`; `sync` (`--space` repeatable, `--all`, `--page`, `--root`, `--cql`, `--metadata-only`, `--changed-only`, `--reconcile`, `--representations`); `runs sync`; `reextract`; `spaces`, `pages show/children/ancestors/siblings/tree/outline/tables/read/labels/properties/attachments/versions/macros/links/diff`; `search` (local substring + projection; `--cql` live); `--data-source live` for metadata, read, bounded tree, CQL; same-version body changes archived | Live mode covers metadata and reads; parsed structure is mirror-only, as the spec requires. Local search is substring, not ranked. |
-| **M2** structural parser | Storage and HTML adapters; scoped headings; physical cells, row groups, `origin/covered/empty/conflict` geometry; `rowspan=0`; group-crossing, overlap and over-long spans flagged; nested tables; evidence blocks; context; limits | Exact source offsets for `raw` (lxml exposes none, so `raw` is a labeled DOM serialization). |
-| **M3** inspection | `tables show` (overview, grid, physical, cell, context, raw, payload), `tables list/tree/compare/selection/resolve`, `align` (cross-representation correspondence and extraction selection) | No rendering-order (CSS) projection; rows are in source DOM order. |
+| **M1** mirror and navigation | `db status/migrate`; `sync` (`--space` repeatable, `--all`, `--page`, `--root`, `--cql`, `--metadata-only`, `--changed-only`, `--reconcile`, `--representations`); `runs sync`; `spaces`, `pages show/children/ancestors/siblings/tree/outline/tables/read/labels/properties/attachments/versions/links/diff`; `search` (local substring + projection; `--cql` live); `--data-source live` for metadata, read, bounded tree, CQL; same-version body changes archived | Live mode covers metadata and reads; parsed structure is mirror-only, as the spec requires. Local search is substring, not ranked. |
+| **M2** structural parser | Rendered HTML (export view, view; storage is mirrored but never parsed); rendered macros via `data-macro-name`; links classified by URL; scoped headings; physical cells, row groups, `origin/covered/empty/conflict` geometry; `rowspan=0`; group-crossing, overlap and over-long spans flagged; nested tables; evidence blocks; context; limits | Exact source offsets for `raw` (lxml exposes none, so `raw` is a labeled DOM serialization). |
+| **M3** inspection | `tables show` (overview, grid, physical, cell, context, raw, payload), `tables list/tree`; extraction reads export view, falling back to view | No rendering-order (CSS) projection; rows are in source DOM order. |
 | **M4** extraction | Registry (5 schemas, 5 profiles), deterministic classification and optional model classification, record-group units, one canonical payload/request serializer, rule extractor, Claude Haiku 5.5 adapter, egress gate, redaction, `classify/plan/extract`, `runs request` | No remote token counting (local estimates only, labeled as such). Model classification is used only where policy allows. |
 | **M5** review and export | `validate`; `records list/show/evidence/diff`; `review queue/show/approve/reject/correct`; entity-match proposals; `export` (JSON/JSONL packages, flat CSV) | No enterprise identity or signed review events; the actor is the local OS user. |
 | **M6** hardening | `runs list/show/items/request/resume/retry`, leases, budgets with dated pricing, `run` orchestration with `--from-stage/--to-stage/--dry-run`, `doctor`, `config show/validate`, `eval run/report/compare`, benchmark script | The bundled eval set is a small synthetic **development** set. A held-out set labelled on your own templates is still needed before production use (see below). |
@@ -41,16 +41,17 @@ prebuilt `pydantic-core`/`jiter` wheels for macOS, so no compiler is needed. Onl
 ```bash
 confex sync --space ITOPS --metadata-only
 confex spaces tree ITOPS --depth 3
-confex sync --page 12345 --representations storage,export_view
+confex sync --page 12345 --representations export_view
 confex sync --root 12345              # a page tree in bulk; --reconcile re-fetches it all
 confex sync --cql 'label = "hosts"'
-confex parse --page 12345 && confex align --page 12345
+confex parse --page 12345                         # rendered HTML -> document model
 confex templates detect --space ITOPS --dry-run   # template families, no model calls
 confex templates detect --space ITOPS             # model proposes and checks templates
 confex templates show 12345                       # latest detection for a parent page
-confex pages outline 12345 --representation storage --tables --macros
-confex tables show 12345:t02 --representation storage --view grid
-confex tables show 12345:t02 --representation storage --view cell --cell R3C1
+confex pages outline 12345 --tables --macros
+confex pages links 12345 --direction both         # from the rendered page; inbound needs parse
+confex tables show 12345:t02 --view grid
+confex tables show 12345:t02 --view cell --cell R3C1
 
 confex classify --page 12345                      # deterministic routing; no model
 confex extract --page 12345 --plan-only           # what would happen; no writes
@@ -62,7 +63,7 @@ confex records evidence rev_<id>
 confex review approve rev_<id> --reason "Checked source cells and context"
 confex export --space ITOPS --approved-only --export-format jsonl --output ./approved
 
-confex run --space ITOPS --changed-only           # sync -> parse -> align -> extract -> validate
+confex run --space ITOPS --changed-only           # sync -> parse -> extract -> validate
 confex runs show run_<id> && confex runs resume run_<id>
 confex runs request attempt_<id>                  # the request body actually sent
 ```
@@ -103,9 +104,7 @@ egress (`[privacy]`), stays within `[budgets]`, and retains each request in
 | Stage | What runs | Model? | Writes |
 |---|---|---|---|
 | `sync` | Confluence REST, GET only | no | `source.*` |
-| `reextract` | mirror extractor over stored bodies, offline | no | `extracted.page_macros`, `macro_extractions`, `page_tables`, `page_links` |
-| `parse` | structural parser | no | `extracted.parse_artifacts`, `table_occurrences`, `search_blocks` |
-| `align` | correspondence | no | `extracted.table_correspondence` |
+| `parse` | structural parser over rendered HTML (export view by default) | no | `extracted.parse_artifacts`, `table_occurrences`, `search_blocks` |
 | `templates detect` | candidate families in code; model proposes a template, then checks every child | yes | `pipeline.template_detections`, `pipeline.attempts` |
 | `classify` | template routing; model only if allowed | optional | `pipeline.classifications` |
 | plan | record-group units, redacted payloads | no | `pipeline.units` |
@@ -159,6 +158,7 @@ capability, `PAYLOAD_NOT_READY`) · `5` ambiguous selector · `6` internal/execu
 | Pinned Anthropic client SDK | `anthropic>=2.3,<3` as the optional `model` extra | The SDK is used, as the spec asks, but only for extraction. Mirror installs stay small. |
 | `confex/` package tree with many top-level packages | `confluence_mirror.{structure,extraction,confex}` plus `inspection`, `pipeline`, `review` services | Same layering; `repository*.py` own all SQL. |
 | Python 3.12+ | Python ≥ 3.11 | Matches the existing package and CI. |
+| Parse storage, export view and view; align tables across them | Parse rendered HTML only (export view, then view); no alignment | Storage lacks what macros render (includes, page-properties reports, Jira tables), so it misled extraction. It is still mirrored, never parsed. |
 | `--profile NAME` | `-c/--config PATH` | One TOML file today. |
 | `raw` as exact slice | labeled `dom_serialization` | lxml exposes no reliable offsets. |
 | Physical cells and a grid artifact | Cells store origin and spans, and the grid is projected on read | Avoids storing up to 250,000 slots per table. |
@@ -169,10 +169,10 @@ capability, `PAYLOAD_NOT_READY`) · `5` ambiguous selector · `6` internal/execu
 |---|---|
 | spaces, space_properties, pages, page_versions, page_labels, page_properties, attachments, access_restrictions, sync_runs | unchanged (`source.*`, `sync.*`) |
 | page_content / immutable snapshots | `source.page_content` (latest capture) + `source.superseded_bodies` (replaced captures); `snap_` IDs from content |
-| page_macros, macro_extractions, page_links, page_tables | unchanged legacy extractor output (`extracted.*`) |
+| page_macros, macro_extractions, page_links, page_tables | legacy storage-extraction tables, kept but no longer written; macros and links now live in parse artifacts |
 | Parse artifacts, document nodes, cells | `extracted.parse_artifacts` (document JSONB), `extracted.table_occurrences` |
 | Local search projection | `extracted.search_blocks` |
-| Table correspondence | `extracted.table_correspondence`; decisions in `review.correspondence_decisions` |
+| Table correspondence | removed with storage parsing (one rendered format is extracted); the tables remain, unwritten |
 | Runs, items, attempts, leases | `pipeline.runs`, `pipeline.run_items`, `pipeline.attempts` |
 | Classifications, units | `pipeline.classifications`, `pipeline.units` |
 | Page-template detections | `pipeline.template_detections` (proposal, per-child checks, verdict) |
@@ -199,13 +199,12 @@ only schema-changing command. Every other command fails with `SCHEMA_INCOMPATIBL
 | `doc_` | snapshot, `PARSER_VERSION`, parse-config fingerprint |
 | `tbl_`, `sec_`, `mac_`, `lay_`, `blk_` | artifact, element path (segment index for cell text) |
 | `cell_` | table, source row index, source cell index |
-| `corr_` | both artifacts, both tables, algorithm version |
 | `cls_`, `unit_`, `val_` | digest of the artifact's own content (classification, unit manifest, validation) |
 | `rev_` | record key, content hash, attempt |
 | `run_`, `attempt_`, `exp_` | random (execution records, not artifacts) |
 
 Evidence text (`evidence-text.v1`) collapses whitespace inside text nodes as HTML renders
-it. `pre` and plain-text macro bodies are kept verbatim. Block boundaries and `<br>` become
+it. `pre` (code blocks) is kept verbatim. Block boundaries and `<br>` become
 newlines. Offsets are 0-based, half-open Unicode code points into `evidence_text`.
 
 Bump `structure.document.PARSER_VERSION`, `classify.CLASSIFIER_VERSION`,

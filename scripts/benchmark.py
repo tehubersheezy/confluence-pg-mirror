@@ -51,7 +51,7 @@ def seed(conn, pages: int, rows: int, cols: int) -> str:
         "VALUES (10000, 1, 'Page 0000')"
     )
     conn.execute(
-        "INSERT INTO source.page_content (page_id, version_number, body_storage) "
+        "INSERT INTO source.page_content (page_id, version_number, body_export_view) "
         "VALUES (10000, 1, %s)",
         (body,),
     )
@@ -95,11 +95,11 @@ def main() -> int:
         "data": {"pages": args.pages, "table": f"{args.rows + 1}x{args.cols}"},
     }
     results["parse_large_table_s"] = timed(
-        lambda: parse_document(body, page_id=10000, version=1, representation="storage"), 1
+        lambda: parse_document(body, page_id=10000, version=1, representation="export_view"), 1
     )
-    assert cli("parse", "--page", "10000", "--representations", "storage") == 0
+    assert cli("parse", "--page", "10000", "--representations", "export_view") == 0
     with db.connect(args.dsn) as conn:
-        resolved, table = inspection.resolve_table(conn, "10000:t01", representation="storage")
+        resolved, table = inspection.resolve_table(conn, "10000:t01", representation="export_view")
         assert resolved.parse_mode == "persisted"
         results["inspect_grid_persisted_s"] = timed(
             lambda: inspection.table_view(conn, resolved, table, "grid", bounded=True)
@@ -111,7 +111,7 @@ def main() -> int:
             lambda: repo.load_artifact(conn, resolved.artifact["artifact_id"])
         )
     results["cli_tables_show_grid_s"] = timed(
-        lambda: cli("tables", "show", "10000:t01", "--representation", "storage", "--view", "grid")
+        lambda: cli("tables", "show", "10000:t01", "--view", "grid")
     )
     results["cli_spaces_tree_s"] = timed(lambda: cli("spaces", "tree", "BENCH", "--counts"))
     results["cli_pages_tree_s"] = timed(
