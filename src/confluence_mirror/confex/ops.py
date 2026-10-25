@@ -18,6 +18,7 @@ from confluence_mirror import repository as repo
 from confluence_mirror import repository_pipeline as prepo
 from confluence_mirror.confex.core import Context, Result, command, group, leaf, safe
 from confluence_mirror.confex.extract import _exit, options, pipeline_for
+from confluence_mirror.confex.nav import sync_scope
 from confluence_mirror.confex.render import kv, table
 from confluence_mirror.config import PAT_ENV, ConfigError
 from confluence_mirror.extraction import provider as provider_mod
@@ -295,7 +296,9 @@ def run_cmd(args, ctx: Context) -> Result:
         )
     results = []
     report = None
-    page_ids = _page_ids(conn, args) if not args.space else None
+    # A --root sync discovers the tree first; the other stages then use what it mirrored.
+    synced_tree = args.root is not None and "sync" in stages
+    page_ids = None if args.space or synced_tree else _page_ids(conn, args)
     for stage in stages:
         if stage == "sync":
             syncer = SpaceSync(conn, ctx.client(), ctx.settings.sync)
@@ -311,27 +314,19 @@ def run_cmd(args, ctx: Context) -> Result:
                     }
                 )
             else:
-                by_space: dict[str, list[int]] = {}
-                for pid in page_ids or []:
-                    page = repo.get_page(conn, pid)
-                    conn.rollback()
-                    key = (
-                        page["space_key"]
-                        if page
-                        else ctx.client().get_content(pid, expand="space")["space"]["key"]
-                    )
-                    by_space.setdefault(key, []).append(pid)
-                statuses = []
-                for key, ids in sorted(by_space.items()):
-                    statuses.append(syncer.run_pages(key, ids).status)
+                found, missing = syncer.run_scope(sync_scope(args, full=False))
+                statuses = [r.status for r in found] + ["partial"] * bool(missing)
                 results.append(
                     {
                         "stage": "sync",
                         "status": "succeeded"
                         if all(s == "succeeded" for s in statuses)
                         else "partial",
+                        "summary": {"runs": len(found), "missing": missing},
                     }
                 )
+                if args.root is not None:  # the tree may have grown
+                    page_ids = _page_ids(conn, args)
         elif stage == "parse":
             data = ins.parse_pages(
                 conn,

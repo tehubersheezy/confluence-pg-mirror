@@ -197,3 +197,15 @@ def test_export_manifest_holds_no_secrets(env, conn, capsys, tmp_path):
     assert code == 0
     for f in out.iterdir():
         assert TOKEN not in f.read_text()
+
+
+def test_tree_scoped_run_and_sync_discover_pages(env, conn, capsys):
+    code, e = run(capsys, "run", "--root", "1002", "--to-stage", "parse")
+    assert code == 0, e
+    stages = {s["stage"]: s for s in e["data"]["stages"]}
+    assert stages["sync"]["status"] == "succeeded" and stages["parse"]["status"] == "succeeded"
+    assert {r[0] for r in conn.execute("SELECT page_id FROM source.pages")} == {1002, 1003}
+    code, e = run(capsys, "sync", "--cql", 'title ~ "Hosts"')
+    assert code == 0 and e["data"]["pages_fetched"] == 1 and e["data"]["mode"] == "pages"
+    code, e = run(capsys, "sync", "--root", "1002", "--changed-only")
+    assert code == inspection.EXIT_USAGE

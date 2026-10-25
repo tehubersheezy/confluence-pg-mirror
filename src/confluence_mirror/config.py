@@ -33,6 +33,9 @@ class ConfluenceSettings:
     backoff_base: float = 1.0
     ca_bundle: str | None = None
     use_system_truststore: bool = False
+    # Client-side ceiling on requests per second (0 disables). Server 429s are still
+    # honoured through Retry-After.
+    max_requests_per_second: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,15 @@ class SyncSettings:
     attachment_dir: str | None = None
     # Body representations fetched per page; storage is always required.
     representations: tuple[str, ...] = ("storage", "export_view", "view")
+    # Space listing: "scan" (/content/scan, DC 7.18+), "legacy" (/content offset paging) or
+    # "auto" (scan, falling back to legacy when the server lacks it).
+    listing: str = "auto"
+    listing_page_size: int = 200
+    # Pages per bulk fetch (CQL id in (...)); the server caps body expansions at 50.
+    body_batch_size: int = 50
+    # Content properties: "all" (one request per fetched page), "none", or a list of keys
+    # fetched in bulk through metadata.properties.<key> expansions.
+    page_properties: str | tuple[str, ...] = "all"
 
 
 @dataclass(frozen=True)
@@ -159,6 +171,8 @@ def load_settings(
         confluence = ConfluenceSettings(**conf)
         if not 1 <= confluence.page_size <= 1000:
             raise ConfigError("confluence.page_size must be between 1 and 1000")
+        if confluence.max_requests_per_second < 0:
+            raise ConfigError("confluence.max_requests_per_second must be >= 0")
     elif require_confluence:
         raise ConfigError("confluence.base_url is required")
 
@@ -174,6 +188,8 @@ def load_settings(
     for key in ("spaces", "content_types", "representations"):
         if key in sync_raw:
             sync_raw[key] = tuple(sync_raw[key])
+    if isinstance(sync_raw.get("page_properties"), list):
+        sync_raw["page_properties"] = tuple(sync_raw["page_properties"])
     sync = SyncSettings(**sync_raw)
     bad_types = set(sync.content_types) - {"page", "blogpost"}
     if bad_types:
@@ -185,6 +201,18 @@ def load_settings(
         )
     if not 0 < sync.max_delete_fraction <= 1:
         raise ConfigError("sync.max_delete_fraction must be in (0, 1]")
+    if sync.listing not in ("auto", "scan", "legacy"):
+        raise ConfigError("sync.listing must be auto, scan or legacy")
+    if not 1 <= sync.body_batch_size <= 50:
+        raise ConfigError("sync.body_batch_size must be between 1 and 50 (server cap)")
+    if not 1 <= sync.listing_page_size <= 1000:
+        raise ConfigError("sync.listing_page_size must be between 1 and 1000")
+    if isinstance(sync.page_properties, str) and sync.page_properties not in ("all", "none"):
+        raise ConfigError('sync.page_properties must be "all", "none" or a list of keys')
+    if isinstance(sync.page_properties, tuple) and not all(
+        isinstance(k, str) and k and "," not in k for k in sync.page_properties
+    ):
+        raise ConfigError("sync.page_properties keys must be non-empty strings without commas")
     return Settings(confluence=confluence, dsn=dsn, sync=sync, confex=_confex_settings(data))
 
 

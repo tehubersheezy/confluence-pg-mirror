@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import ssl
 import time
 from collections.abc import Callable, Iterator
@@ -63,6 +64,27 @@ def content_expand(representations: tuple[str, ...] | list[str]) -> str:
     )
 
 
+ATTACHMENT_EXPAND = "version,history,container"
+# Expanded children of a page in bulk fetches (first page of each collection).
+CHILD_ATTACHMENTS_EXPAND = ",".join(
+    f"children.attachment.{part}" for part in ATTACHMENT_EXPAND.split(",")
+)
+
+
+def bulk_expand(
+    representations: tuple[str, ...] | list[str], property_keys: tuple[str, ...] = ()
+) -> str:
+    """Everything one page needs, for ``id in (...)`` batch fetches."""
+    parts = [content_expand(representations), "metadata.labels", CHILD_ATTACHMENTS_EXPAND]
+    parts += [f"metadata.properties.{k}" for k in property_keys]
+    return ",".join(parts)
+
+
+def cql_string(value: str) -> str:
+    """A CQL string literal."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 class ConfluenceError(Exception):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(redact(message))
@@ -108,9 +130,14 @@ class ConfluenceClient:
         *,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         register_secret(token)
         self.settings = settings
+        self._clock = clock
+        self._next_slot = 0.0
+        # Requests sent (retries included), by endpoint kind; reported in sync stats.
+        self.request_counts: dict[str, int] = {}
         self.base_url = settings.base_url.rstrip("/")
         parts = urlsplit(self.base_url)
         self._origin = f"{parts.scheme}://{parts.netloc}"
@@ -156,10 +183,33 @@ class ConfluenceClient:
             return self._origin + path_or_url
         return self.base_url + path_or_url
 
+    def _throttle(self) -> None:
+        rate = self.settings.max_requests_per_second
+        if not rate:
+            return
+        now = self._clock()
+        if now < self._next_slot:
+            self._sleep(self._next_slot - now)
+            now = self._next_slot
+        self._next_slot = now + 1.0 / rate
+
+    def _count(self, url: str) -> None:
+        path = urlsplit(url).path
+        if self._context_path and path.startswith(self._context_path):
+            path = path[len(self._context_path) :]
+        kind = re.sub(r"/\d+", "/{id}", path)
+        self.request_counts[kind] = self.request_counts.get(kind, 0) + 1
+
+    @property
+    def request_count(self) -> int:
+        return sum(self.request_counts.values())
+
     def _get(self, path_or_url: str, params: dict[str, Any] | None, *, stream: bool = False):
         url = self.url_for(path_or_url)
         attempt = 0
         while True:
+            self._throttle()
+            self._count(url)
             try:
                 request = self._http.build_request("GET", url, params=params)
                 response = self._http.send(request, stream=stream)
@@ -237,10 +287,12 @@ class ConfluenceClient:
                 f"non-JSON response from {urlsplit(str(response.url)).path}", response.status_code
             ) from exc
 
-    def paginate(self, path: str, params: dict[str, Any] | None = None) -> Iterator[dict]:
+    def paginate(
+        self, path: str, params: dict[str, Any] | None = None, *, limit: int | None = None
+    ) -> Iterator[dict]:
         """Yield every item of a paginated ``{"results": [...], "_links": {"next": ...}}``."""
         params = dict(params or {})
-        params.setdefault("limit", self.settings.page_size)
+        params.setdefault("limit", limit or self.settings.page_size)
         next_ref: str | None = path
         next_params: dict[str, Any] | None = params
         seen_pages: set[str] = set()
@@ -273,7 +325,9 @@ class ConfluenceClient:
     def space_properties(self, space_key: str) -> Iterator[dict]:
         return self.paginate(f"/rest/api/space/{space_key}/property", {"expand": "version"})
 
-    def list_content(self, space_key: str, content_type: str = "page") -> Iterator[dict]:
+    def list_content(
+        self, space_key: str, content_type: str = "page", *, limit: int | None = None
+    ) -> Iterator[dict]:
         return self.paginate(
             "/rest/api/content",
             {
@@ -282,6 +336,7 @@ class ConfluenceClient:
                 "status": "current",
                 "expand": CONTENT_EXPAND_LIST,
             },
+            limit=limit,
         )
 
     def get_content(
@@ -313,7 +368,7 @@ class ConfluenceClient:
     def attachments(self, content_id: int | str) -> Iterator[dict]:
         return self.paginate(
             f"/rest/api/content/{content_id}/child/attachment",
-            {"expand": "version,history,container"},
+            {"expand": ATTACHMENT_EXPAND},
         )
 
     def restrictions(self, content_id: int | str) -> dict:
@@ -322,11 +377,59 @@ class ConfluenceClient:
             {"expand": "restrictions.user,restrictions.group"},
         )
 
-    def search(self, cql: str, expand: str | None = None) -> Iterator[dict]:
+    def search(
+        self, cql: str, expand: str | None = None, *, limit: int | None = None
+    ) -> Iterator[dict]:
+        """CQL content search. The server caps each page (50 with a body expansion, 200 with
+        other expansions, 1000 without); pagination continues past the cap."""
         params: dict[str, Any] = {"cql": cql}
         if expand:
             params["expand"] = expand
-        return self.paginate("/rest/api/content/search", params)
+        return self.paginate("/rest/api/content/search", params, limit=limit)
+
+    def content_by_ids(
+        self, ids: list[int], expand: str, *, limit: int | None = None
+    ) -> Iterator[dict]:
+        """Several pages in one request: ``id in (...)``."""
+        if not ids:
+            return iter(())
+        cql = f"id in ({','.join(str(int(i)) for i in ids)})"
+        return self.search(cql, expand, limit=limit or len(ids))
+
+    def scan_content(
+        self, space_key: str, content_type: str, expand: str, *, limit: int
+    ) -> Iterator[dict]:
+        """``/rest/api/content/scan`` (DC 7.18+ for pages, 8.3+ for blog posts).
+
+        Cursor-paginated and cheaper than offset listing on large spaces. Follows
+        ``_links.next`` when present, else ``nextCursor``; a repeated cursor is an error.
+        """
+        base: dict[str, Any] = {
+            "spaceKey": space_key,
+            "type": content_type,
+            "status": "current",
+            "expand": expand,
+            "limit": limit,
+        }
+        path, params = "/rest/api/content/scan", base
+        seen: set[str] = set()
+        while True:
+            page = self.get_json(path, params)
+            if not isinstance(page, dict) or not isinstance(page.get("results"), list):
+                raise ConfluenceError("unexpected response from /rest/api/content/scan")
+            yield from page["results"]
+            link = (page.get("_links") or {}).get("next")
+            cursor = page.get("nextCursor")
+            if link:
+                path, params, marker = self.url_for(link), None, link
+            elif cursor and len(page["results"]) >= int(page.get("limit") or limit):
+                path, params = "/rest/api/content/scan", {**base, "cursor": cursor}
+                marker = cursor
+            else:
+                return
+            if marker in seen:
+                raise ConfluenceError("pagination loop detected at /rest/api/content/scan")
+            seen.add(marker)
 
     def download(self, download_path: str, dest: Path) -> str:
         """Stream a binary to ``dest`` atomically; return its SHA-256."""

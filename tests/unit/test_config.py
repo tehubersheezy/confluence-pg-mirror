@@ -153,3 +153,36 @@ def test_confex_sections(tmp_path):
 def test_confex_sections_reject(tmp_path, text, message):
     with pytest.raises(ConfigError, match=re.escape(message)):
         _confex(tmp_path, text)
+
+
+def test_bulk_sync_settings(tmp_path):
+    s = load_settings(
+        write(
+            tmp_path,
+            BASE.replace("[sync]", '[sync]\nlisting = "scan"\npage_properties = ["owner"]') + "\n",
+        ),
+        env={},
+    )
+    assert s.sync.listing == "scan" and s.sync.page_properties == ("owner",)
+    assert s.sync.body_batch_size == 50 and s.confluence.max_requests_per_second == 5.0
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ('listing = "cql"', "sync.listing"),
+        ("body_batch_size = 51", "body_batch_size"),
+        ("listing_page_size = 0", "listing_page_size"),
+        ('page_properties = "some"', "page_properties"),
+        ('page_properties = ["a,b"]', "page_properties"),
+    ],
+)
+def test_bulk_sync_settings_rejected(tmp_path, line, message):
+    with pytest.raises(ConfigError, match=message):
+        load_settings(write(tmp_path, BASE.replace("[sync]", f"[sync]\n{line}")), env={})
+
+
+def test_negative_rate_rejected(tmp_path):
+    text = BASE.replace("[confluence]", "[confluence]\nmax_requests_per_second = -1")
+    with pytest.raises(ConfigError, match="max_requests_per_second"):
+        load_settings(write(tmp_path, text), env={})

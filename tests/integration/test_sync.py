@@ -18,7 +18,8 @@ def fake(rich_storage):
 
 
 def body_fetches(fake):
-    return fake.count(r"/rest/api/content/\d+$", param=("expand", "body.storage"))
+    """Requests that carried page bodies (bulk batches and single-page fallbacks)."""
+    return fake.count(r"/rest/api/content(/\d+|/search)$", param=("expand", "body.storage"))
 
 
 def test_full_sync_mirrors_space(conn, fake):
@@ -264,6 +265,8 @@ def test_deletion_guard(conn, fake):
 
 
 def test_page_failure_is_isolated_and_retried(conn, fake):
+    # The bulk batch fails, so pages are fetched one by one, and one of those fails too.
+    fake.fail(r"/rest/api/content/search$", 500, 500, 500)
     fake.fail(r"/rest/api/content/1003$", 500, 500, 500, 500, 500, 500)
     report = sync(conn, fake)
     assert report.status == "partial"

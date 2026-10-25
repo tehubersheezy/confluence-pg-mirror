@@ -148,9 +148,9 @@ def label_rows(labels: list[dict]) -> list[dict[str, Any]]:
     return list(rows.values())
 
 
-def listing_labels(content: dict) -> tuple[list[dict], bool]:
-    """Labels embedded in a listing (metadata.labels); second value is True if complete."""
-    block = ((content.get("metadata") or {}).get("labels")) or {}
+def _expanded(block: dict | None) -> tuple[list[dict], bool]:
+    """Items of an expanded collection; second value is True only if it is complete."""
+    block = block or {}
     results = block.get("results") or []
     links = block.get("_links") or {}
     size, limit = block.get("size"), block.get("limit")
@@ -158,6 +158,22 @@ def listing_labels(content: dict) -> tuple[list[dict], bool]:
         limit is not None and size is not None and size >= limit
     )
     return results, ("results" in block) and not truncated
+
+
+def listing_labels(content: dict) -> tuple[list[dict], bool]:
+    """Labels embedded in a listing (metadata.labels); second value is True if complete."""
+    return _expanded((content.get("metadata") or {}).get("labels"))
+
+
+def expanded_attachments(content: dict) -> tuple[list[dict], bool]:
+    """Attachments embedded via ``children.attachment``; True if the list is complete."""
+    return _expanded((content.get("children") or {}).get("attachment"))
+
+
+def expanded_properties(content: dict, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Content properties embedded via ``metadata.properties.<key>`` expansions."""
+    found = (content.get("metadata") or {}).get("properties") or {}
+    return [property_row(found[k]) for k in keys if isinstance(found.get(k), dict)]
 
 
 def restriction_rows(content: dict) -> tuple[list[dict[str, Any]], bool]:

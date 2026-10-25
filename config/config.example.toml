@@ -12,6 +12,8 @@ page_size = 50
 # Retries for 429/5xx/network errors, with exponential backoff (honors Retry-After).
 max_retries = 5
 backoff_base = 1.0
+# Client-side rate limit, applied to every request including retries. 0 = unlimited.
+max_requests_per_second = 5.0
 # TLS verification is always on. To trust a corporate CA, either:
 #   ca_bundle = "/Users/you/certs/corp-root.pem"
 # or use the macOS Keychain via the optional `truststore` extra:
@@ -35,6 +37,16 @@ incremental_overlap_minutes = 1440
 # Re-fetch labels/properties/restrictions/attachments for unchanged pages
 # during incremental sync (slower, catches metadata-only edits).
 refresh_unchanged_metadata = false
+# Space listing: "scan" (/rest/api/content/scan, DC 7.18+; blog posts need 8.3+),
+# "legacy" (offset paging on /rest/api/content) or "auto" (scan, falling back to legacy).
+listing = "auto"
+# Pages per listing request (scan accepts up to 1000; CQL listings cap at 200).
+listing_page_size = 200
+# Changed pages fetched per request with bodies and metadata (the server caps this at 50).
+body_batch_size = 50
+# Content properties: "all" (one extra request per fetched page), "none" (left as stored),
+# or a list of keys fetched inside the batch requests, e.g. ["owner", "review-date"].
+page_properties = "all"
 # Optional: download attachment binaries to this directory (metadata is always mirrored).
 # attachment_dir = "./attachments"
 # Body representations fetched per page (storage is required).
