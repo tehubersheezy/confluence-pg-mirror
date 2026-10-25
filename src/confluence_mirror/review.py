@@ -75,10 +75,6 @@ def state(row: dict) -> dict[str, str]:
     }
 
 
-def _identity(row: dict) -> dict:
-    return {f["field"]: f["value"] for f in row["record"]["fields"]}
-
-
 def list_records(
     conn, *, space=None, run=None, schema=None, page=None, review_state: str | None = None
 ) -> list[dict]:

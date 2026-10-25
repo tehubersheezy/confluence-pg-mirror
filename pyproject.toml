@@ -32,7 +32,6 @@ model = ["anthropic>=2.3,<3"]
 dev = ["pytest>=8", "ruff>=0.5", "anthropic>=2.3,<3"]
 
 [project.scripts]
-confluence-mirror = "confluence_mirror.cli:main"
 confex = "confluence_mirror.confex:main"
 
 [tool.setuptools.packages.find]

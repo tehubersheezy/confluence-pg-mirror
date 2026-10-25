@@ -21,19 +21,6 @@ from confluence_mirror.inspection import (
 from confluence_mirror.structure import REPRESENTATIONS, parse_document
 
 _PAGE_EXPAND = "version,ancestors,space,history,metadata.labels,extensions.position"
-LIVE_COMMANDS = {
-    "spaces.list",
-    "spaces.show",
-    "pages.show",
-    "pages.children",
-    "pages.ancestors",
-    "pages.labels",
-    "pages.properties",
-    "pages.attachments",
-    "pages.read",
-    "pages.tree",
-    "search",
-}
 
 
 def _content(client: ConfluenceClient, page_id: int, expand: str = _PAGE_EXPAND) -> dict:

@@ -149,11 +149,6 @@ class SpaceSync:
             raise ValueError(f"unknown mode {mode}")
         return self._locked(space_key, lambda: self._run_locked(space_key, mode))
 
-    def run_pages(self, space_key: str, page_ids: list[int]) -> SyncReport:
-        """Fetch selected pages of one space (mode ``pages``); see :meth:`run_scope`."""
-        reports, _ = self.run_scope(Scope("pages", page_ids=tuple(page_ids), full=True))
-        return reports[0] if reports else self._empty_report(space_key)
-
     def run_metadata(self, space_key: str) -> SyncReport:
         """List the space and record page metadata only (mode ``metadata``); no bodies."""
         return self._locked(space_key, lambda: self._run_metadata(space_key))
@@ -175,16 +170,6 @@ class SpaceSync:
             for key in sorted(by_space)
         ]
         return reports, missing
-
-    def _empty_report(self, space_key: str) -> SyncReport:
-        return SyncReport(
-            0,
-            space_key,
-            "pages",
-            "partial",
-            Counters(),
-            [{"stage": "listing", "error": "no visible pages in the selection"}],
-        )
 
     def _scope_listing(self, scope: Scope) -> tuple[list[dict], list[int]]:
         limit = min(self.settings.listing_page_size, 200)  # CQL cap with expansions

@@ -197,16 +197,6 @@ def get_attempt(conn, attempt_id: str) -> dict | None:
     )
 
 
-def attempts_for(conn, target_id: str) -> list[dict]:
-    return _dicts(
-        conn.execute(
-            "SELECT attempt_id, stage, extractor, attempt_number, outcome, started_at, "
-            "finished_at FROM pipeline.attempts WHERE target_id = %s ORDER BY started_at",
-            (target_id,),
-        )
-    )
-
-
 def succeeded_attempt_for_unit(conn, unit_id: str) -> dict | None:
     return _one_dict(
         conn.execute(

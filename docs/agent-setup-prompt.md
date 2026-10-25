@@ -14,7 +14,7 @@ does not match, follow **If not**; if that says STOP, stop and report to the use
 
 1. **No admin rights.** Never use `sudo`, never write outside the user's home directory,
    and never install with a `.pkg` installer.
-2. **No Docker.**
+2. **No Docker and no conda** (no Anaconda, Miniconda, micromamba or conda-forge).
 3. **Never see the token.** The Confluence personal access token (PAT) is typed by the user
    into `.env` themselves. Never ask for it in chat, never print `.env`
    (`cat`, `less`, `head`, `grep` without `-c`), never echo `$CONFLUENCE_PAT`, and never
@@ -41,8 +41,6 @@ uname -sm; sw_vers -productVersion; echo "$HOME"; command -v git curl
 `curl`.
 **If not:** if `git` is missing, run `xcode-select --install` only if the user agrees
 (it opens a dialog), otherwise STOP.
-
-Record `ARCH`: `osx-arm64` if `uname -m` is `arm64`, else `osx-64`.
 
 ## Step 2 — Get the code
 
@@ -82,9 +80,9 @@ steps say `uv pip install`. Otherwise STOP.
 Run:
 ```bash
 uv pip install --python .venv/bin/python -e '.[dev,truststore]'
-.venv/bin/confluence-mirror --version
+.venv/bin/confex --version
 ```
-**Expect:** `confluence-mirror 0.1.0` (or newer).
+**Expect:** `confex 0.1.0` (or newer).
 **If not:** STOP.
 
 ## Step 5 — PostgreSQL binaries
@@ -92,21 +90,23 @@ uv pip install --python .venv/bin/python -e '.[dev,truststore]'
 Find PostgreSQL in this order, and stop at the first that works. Record the directory as
 `PGBIN`.
 
-a. Postgres.app:
+a. Postgres.app, system-wide or in the user's own Applications folder:
 ```bash
-ls /Applications/Postgres.app/Contents/Versions/latest/bin/initdb 2>/dev/null
+ls /Applications/Postgres.app/Contents/Versions/latest/bin/initdb \
+   "$HOME/Applications/Postgres.app/Contents/Versions/latest/bin/initdb" 2>/dev/null
 ```
-If found: `PGBIN=/Applications/Postgres.app/Contents/Versions/latest/bin`.
+If found: `PGBIN` is the directory of the first path listed.
 
 b. Already on PATH: `command -v initdb` → `PGBIN` is its directory.
 
-c. Otherwise, install user-space binaries from conda-forge (no admin):
-```bash
-mkdir -p "$HOME/.local/bin"
-curl -Ls "https://micro.mamba.pm/api/micromamba/$ARCH/latest" | tar -xvj -C "$HOME/.local" bin/micromamba
-"$HOME/.local/bin/micromamba" create -y -p "$HOME/.local/share/cpm-postgres" -c conda-forge postgresql=16
-PGBIN="$HOME/.local/share/cpm-postgres/bin"
-```
+c. Otherwise, ask the user to install Postgres.app without admin rights, word for word:
+
+> Please download Postgres.app from https://postgresapp.com/downloads.html, open the disk
+> image, and drag Postgres.app into the **Applications folder in your home directory**
+> (`~/Applications`; create it in Finder if it doesn't exist), not the system one. You
+> don't need to start it. Tell me when you're done.
+
+Wait for the user, then repeat check a. If it is still not found, STOP.
 
 **Check:** `"$PGBIN/initdb" --version && "$PGBIN/pg_ctl" --version`
 **Expect:** both print `PostgreSQL 14` or newer.
@@ -121,7 +121,7 @@ Run:
 ```bash
 PATH="$PGBIN:$PATH" CPM_REQUIRE_POSTGRES=1 .venv/bin/pytest -q
 ```
-**Expect:** a final line like `85 passed` with **0 failed** and **0 errors**.
+**Expect:** a final line like `N passed` with **0 failed** and **0 errors**.
 **If not:** STOP and report the summary lines and the first failure. Do not edit code or
 tests.
 
@@ -199,40 +199,41 @@ grep -c '^CONFLUENCE_PAT=..*' .env
 
 Run:
 ```bash
-.venv/bin/confluence-mirror db migrate
-.venv/bin/confluence-mirror db status
-.venv/bin/confluence-mirror check; echo "exit=$?"
+.venv/bin/confex db migrate
+.venv/bin/confex db status
+.venv/bin/confex doctor --check-db --check-confluence; echo "exit=$?"
 ```
-**Expect:** `db status` shows every migration with `"applied": true`; `check` prints
-`"ok": true` with the user's Confluence username, and `exit=0`.
+**Expect:** `db status` shows every migration as applied; `doctor` shows `ok` for
+`config`, `database` and `confluence` (with "authenticated as" the user's Confluence
+username), and `exit=0`. `skipped` rows (model checks) are fine.
 
-**If not**, use the exit code of `check`:
-- `exit=4` (authentication): tell the user the token was rejected and ask them to make a
-  new one and update `.env`. Return to the check in Step 9.
-- An error mentioning `CERTIFICATE_VERIFY_FAILED` or `certificate`: the company uses its
-  own certificate authority. In `config.toml` set `use_system_truststore = true` under
-  `[confluence]`, then run `check` again. If it still fails, ask the user for the path to
+**If not**, read the `confluence` row's detail:
+- It mentions authentication or `401`: tell the user the token was rejected and ask them
+  to make a new one and update `.env`. Return to the check in Step 9.
+- It mentions `CERTIFICATE_VERIFY_FAILED` or `certificate`: the company uses its own
+  certificate authority. In `config.toml` set `use_system_truststore = true` under
+  `[confluence]`, then run `doctor` again. If it still fails, ask the user for the path to
   their company's root CA file (PEM). Set `ca_bundle = "<path>"` instead of
-  `use_system_truststore`, then run `check` again. If it still fails, STOP.
-- `exit=1` (configuration): read the message, fix `config.toml` if the message names a
+  `use_system_truststore`, then run `doctor` again. If it still fails, STOP.
+- The `config` row fails: read the message, fix `config.toml` if the message names a
   setting you set in Step 8, and run again. Otherwise STOP.
-- `exit=3` or a network error (DNS, timeout, connection refused): the user may need to be
-  on the company network or VPN. Ask them, wait, and retry once. Then STOP.
+- A network error (DNS, timeout, connection refused): the user may need to be on the
+  company network or VPN. Ask them, wait, and retry once. Then STOP.
 
 ## Step 11 — First sync
 
 Run:
 ```bash
-.venv/bin/confluence-mirror sync --all; echo "exit=$?"
+.venv/bin/confex sync --all; echo "exit=$?"
 ```
 This can take a while for big spaces. Do not interrupt it.
 
-**Expect:** a JSON summary with `"status": "succeeded"` and `exit=0`.
+**Expect:** a summary with `status: succeeded` and `exit=0`.
 **If not:**
-- `exit=2` / `"status": "partial"`: some pages failed. That is acceptable for a first
-  run. Note `pages_failed` and the first 3 entries of `errors` for the report. Do not retry.
-- `exit=4`: the token lacks access to that space. Report it.
-- `exit=3`: report the error message.
+- `exit=9` / `status: partial`: some pages failed. That is acceptable for a first run.
+  Note `pages_failed` and the first 3 `error` lines for the report. Do not retry.
+- `exit=8`: the token was rejected or lacks access. Report it.
+- Any other exit code: report the error message.
 
 Then show the user what was mirrored:
 ```bash
@@ -250,8 +251,8 @@ Report the numbers only, not page titles or content.
 Reply to the user with exactly these sections:
 
 1. **Result**: `succeeded`, `partial` or `stopped at step N`.
-2. **Installed**: the Python version, the PostgreSQL source (Postgres.app, PATH or
-   conda-forge) and its version, and the test result line from Step 6.
+2. **Installed**: the Python version, the PostgreSQL source (Postgres.app or PATH) and its
+   version, and the test result line from Step 6.
 3. **Mirror**: the counts from Step 11 and the sync status.
 4. **Problems**: anything that failed, with the exact error. Never include the token.
 5. **How to use it later** (copy this block, filling in `PGBIN`):
@@ -260,8 +261,8 @@ Reply to the user with exactly these sections:
    # after a reboot, start the database:
    <PGBIN>/pg_ctl -D ~/pgdata/confluence-mirror -l ~/pgdata/confluence-mirror.log \
      -o "-p 5433 -k /tmp -c listen_addresses=localhost" start
-   .venv/bin/confluence-mirror sync --all        # incremental after the first run
-   .venv/bin/confluence-mirror runs              # history of sync runs
+   .venv/bin/confex sync --all        # incremental after the first run
+   .venv/bin/confex runs sync         # history of sync runs
    <PGBIN>/psql -h /tmp -p 5433 -d confluence_mirror
    ```
 

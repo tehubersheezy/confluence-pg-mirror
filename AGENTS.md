@@ -21,11 +21,11 @@ Guidance for coding agents and contributors working on this repository.
 ## Architecture
 
 ```
-cli.py ──► sync.SpaceSync ──► client.ConfluenceClient   (HTTP, GET only)
-               │
-               ├──► models.py      (pure: API JSON → row dicts)
-               ├──► repository.py  (all SQL; idempotent upserts)
-               └──► extract/       (pure: storage XHTML → macros/tables/links)
+confex sync ──► sync.SpaceSync ──► client.ConfluenceClient   (HTTP, GET only)
+                    │
+                    ├──► models.py      (pure: API JSON → row dicts)
+                    ├──► repository.py  (all SQL; idempotent upserts)
+                    └──► extract/       (pure: storage XHTML → macros/tables/links)
 confex/ (CLI) ──► inspection.py ─┬─► repository.py           (mirror reads; parse/align writes)
               ├──► pipeline.py ───┼─► repository_pipeline.py  (pipeline.* and review.* SQL)
               ├──► review.py ─────┘
@@ -36,8 +36,8 @@ extraction/provider.py  (the only module that talks to a model; imports the SDK 
 db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 ```
 
-- **confex** (`docs/confex.md`): mirror commands never construct an HTTP client and run on
-  a read-only connection. Parse artifacts, classifications, units, attempts, revisions and
+- **confex** (`docs/confex.md`) is the only CLI (`python -m confluence_mirror` runs it too).
+  Mirror commands never construct an HTTP client and run on a read-only connection. Parse artifacts, classifications, units, attempts, revisions and
   review events are immutable. Bump the stage's version constant (`PARSER_VERSION`,
   `CLASSIFIER_VERSION`, `PLANNER_VERSION`, `PROMPT_VERSION`, `RULES_VERSION`,
   `VALIDATOR_VERSION`) when its output changes; never update stored artifacts in place.
@@ -51,8 +51,8 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
   `repository` and `repository_pipeline` own every SQL statement. `sync` orchestrates and
   owns transactions. Keep SQL out of `sync.py` and HTTP out of `repository.py`.
 - **Schemas separate provenance.** `source.*` holds what the API returned. `extracted.*`
-  holds what we derived, and must be rebuildable from `source` alone (`confluence-mirror
-  extract`). `sync.*` holds bookkeeping. Never write derived values into `source`; the one
+  holds what we derived, and must be rebuildable from `source` alone (`confex
+  reextract`). `sync.*` holds bookkeeping. Never write derived values into `source`; the one
   exception is `page_content.extractor_version`/`extracted_at`, which records *that*
   extraction happened.
 - **Discovery is listing-driven, not CQL-driven.** Each run lists the entire space with
@@ -109,8 +109,9 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 - Logging: module-level `log = logging.getLogger(__name__)`; `%s` formatting, not f-strings
   in log calls; never log response bodies of authenticated calls at INFO.
 - Errors: raise the client's typed errors (`AuthenticationError`, `ForbiddenError`,
-  `NotFoundError`, `ConfluenceError`). The CLI maps them to exit codes (`0` ok, `1` config,
-  `2` partial, `3` failed, `4` auth).
+  `NotFoundError`, `ConfluenceError`) or `ConfexError` with a stable code. `confex.core`
+  maps them to exit codes (`docs/confex.md#exit-codes`: `2` config/usage, `6` source error,
+  `8` auth, `9` partial, …).
 
 ## Testing
 

@@ -1,9 +1,8 @@
 # confex
 
-`confex` is the exploration, structural-inspection and evidence-backed extraction CLI
-described in the *Confex Complete Spec v1*. The spec is a private planning document and is
-not committed. It lives in this repository next to `confluence-mirror` and uses the same
-mirror database.
+`confex` is this repository's command line. It sets up and syncs the mirror, and it is the
+exploration, structural-inspection and evidence-backed extraction CLI described in the
+*Confex Complete Spec v1*. The spec is a private planning document and is not committed.
 
 > Preserve what Confluence supplied. Compute structure in code. Ask the model to interpret
 > meaning. Validate evidence. Require approval before treating a candidate as accepted data.
@@ -29,7 +28,7 @@ prebuilt `pydantic-core`/`jiter` wheels for macOS, so no compiler is needed. Onl
 | Milestone | Delivered | Not yet / limits |
 |---|---|---|
 | **M0** contract | This document: schema mapping, identity recipe, config groups, output envelope `confex.cli.v1`, synthetic fixtures | Lockfile: the repo pins ranges in `pyproject.toml`. Generate a hashed `requirements.lock` for your approved interpreter with `pip-compile --generate-hashes`. |
-| **M1** mirror and navigation | `sync` (`--space`, `--page`, `--metadata-only`, `--changed-only`, `--reconcile`, `--representations`); `spaces`, `pages show/children/ancestors/siblings/tree/outline/tables/read/labels/properties/attachments/versions/macros/links/diff`; `search` (local substring + projection; `--cql` live); `--data-source live` for metadata, read, bounded tree, CQL; same-version body changes archived | Live mode covers metadata and reads; parsed structure is mirror-only, as the spec requires. Local search is substring, not ranked. |
+| **M1** mirror and navigation | `db status/migrate`; `sync` (`--space` repeatable, `--all`, `--page`, `--root`, `--cql`, `--metadata-only`, `--changed-only`, `--reconcile`, `--representations`); `runs sync`; `reextract`; `spaces`, `pages show/children/ancestors/siblings/tree/outline/tables/read/labels/properties/attachments/versions/macros/links/diff`; `search` (local substring + projection; `--cql` live); `--data-source live` for metadata, read, bounded tree, CQL; same-version body changes archived | Live mode covers metadata and reads; parsed structure is mirror-only, as the spec requires. Local search is substring, not ranked. |
 | **M2** structural parser | Storage and HTML adapters; scoped headings; physical cells, row groups, `origin/covered/empty/conflict` geometry; `rowspan=0`; group-crossing, overlap and over-long spans flagged; nested tables; evidence blocks; context; limits | Exact source offsets for `raw` (lxml exposes none, so `raw` is a labeled DOM serialization). |
 | **M3** inspection | `tables show` (overview, grid, physical, cell, context, raw, payload), `tables list/tree/compare/selection/resolve`, `align` (cross-representation correspondence and extraction selection) | No rendering-order (CSS) projection; rows are in source DOM order. |
 | **M4** extraction | Registry (5 schemas, 5 profiles), deterministic classification and optional model classification, record-group units, one canonical payload/request serializer, rule extractor, Claude Haiku 5.5 adapter, egress gate, redaction, `classify/plan/extract`, `runs request` | No remote token counting (local estimates only, labeled as such). Model classification is used only where policy allows. |
@@ -72,6 +71,7 @@ confex runs request attempt_<id>                  # the request body actually se
 | Stage | What runs | Model? | Writes |
 |---|---|---|---|
 | `sync` | Confluence REST, GET only | no | `source.*` |
+| `reextract` | mirror extractor over stored bodies, offline | no | `extracted.page_macros`, `macro_extractions`, `page_tables`, `page_links` |
 | `parse` | structural parser | no | `extracted.parse_artifacts`, `table_occurrences`, `search_blocks` |
 | `align` | correspondence | no | `extracted.table_correspondence` |
 | `classify` | template routing; model only if allowed | optional | `pipeline.classifications` |

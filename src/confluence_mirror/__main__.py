@@ -1,3 +1,3 @@
-from confluence_mirror.cli import main
+from confluence_mirror.confex import main
 
 raise SystemExit(main())

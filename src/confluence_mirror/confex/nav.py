@@ -9,6 +9,7 @@ from typing import Any
 from confluence_mirror import db, live
 from confluence_mirror import inspection as ins
 from confluence_mirror import repository as repo
+from confluence_mirror.client import AuthenticationError, ConfluenceError
 from confluence_mirror.confex.core import (
     Context,
     Result,
@@ -24,7 +25,7 @@ from confluence_mirror.confex.core import (
 from confluence_mirror.confex.render import diag_lines, items_table, kv, table, tree_lines
 from confluence_mirror.inspection import ConfexError
 from confluence_mirror.structure import REPRESENTATIONS
-from confluence_mirror.sync import Scope, SpaceSync
+from confluence_mirror.sync import Scope, SpaceSync, SyncLockedError, reextract
 
 REP_CHOICES = ("auto", *REPRESENTATIONS)
 
@@ -32,7 +33,16 @@ REP_CHOICES = ("auto", *REPRESENTATIONS)
 def register(sub: argparse._SubParsersAction) -> None:
     dbg = group(sub, "db", "schema status and migrations")
     leaf(dbg, "db.status", "applied and pending migrations")
-    leaf(dbg, "db.migrate", "apply pending migrations (the only schema-changing command)")
+    dm = leaf(dbg, "db.migrate", "apply pending migrations (the only schema-changing command)")
+    dm.add_argument("--target", type=int, metavar="N", help="stop after migration N")
+
+    rx = leaf(sub, "reextract", "rebuild extracted.* macros, tables and links (offline)")
+    rx_scope = rx.add_mutually_exclusive_group()
+    rx_scope.add_argument("--space", metavar="KEY")
+    rx_scope.add_argument("--page", type=int, action="append", metavar="ID")
+    rx.add_argument(
+        "--all-versions", action="store_true", help="every stored version, not just current ones"
+    )
 
     p = leaf(sub, "parse", "persist structural artifacts for stored bodies (offline)")
     scope = p.add_mutually_exclusive_group(required=True)
@@ -48,8 +58,11 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     s = leaf(sub, "sync", "read Confluence and write the mirror (the only source writer)")
     scope = s.add_mutually_exclusive_group(required=True)
-    scope.add_argument("--space", metavar="KEY")
-    scope.add_argument("--page", type=int, action="append", metavar="ID")
+    scope.add_argument("--space", action="append", metavar="KEY", help="space key (repeatable)")
+    scope.add_argument("--all", action="store_true", help="every space in [sync].spaces")
+    scope.add_argument(
+        "--page", type=int, action="append", metavar="ID", help="a page (repeatable; re-fetched)"
+    )
     scope.add_argument("--root", type=int, metavar="ID", help="a page and all its descendants")
     scope.add_argument("--cql", metavar="QUERY", help="every page a CQL search returns")
     mode = s.add_mutually_exclusive_group()
@@ -158,15 +171,30 @@ def db_status(args, ctx: Context) -> Result:
     plain=lambda d, a: "".join(f"applied {m}\n" for m in d["applied"]) or "up to date\n",
 )
 def db_migrate(args, ctx: Context) -> Result:
-    applied = db.migrate(ctx.conn())
+    applied = db.migrate(ctx.conn(), args.target)
     return Result({"applied": [f"{m.version:04d}_{m.name}" for m in applied]})
 
 
 def _plain_counts(data, args):
+    if "runs" in data:
+        return "\n".join(_plain_counts(r, args) for r in data["runs"])
     out = kv([(k, v) for k, v in data.items() if k != "errors"])
     for e in data.get("errors", []):
         out += f"error {safe(e)}\n"
     return out
+
+
+@command("reextract", writes=True, plain=_plain_counts)
+def reextract_cmd(args, ctx: Context) -> Result:
+    confluence = ctx.settings.confluence
+    data = reextract(
+        ctx.conn(),
+        base_url=confluence.base_url if confluence else None,
+        space_key=args.space,
+        page_ids=args.page,
+        all_versions=args.all_versions,
+    )
+    return Result(data, exit_code=ins.EXIT_PARTIAL if data["failed"] else ins.EXIT_OK)
 
 
 @command("parse", writes=True, plain=_plain_counts)
@@ -201,13 +229,28 @@ def sync_cmd(args, ctx: Context) -> Result:
         settings = dataclasses.replace(settings, representations=tuple(args.representations))
     conn, client = ctx.conn(), ctx.client()
     syncer = SpaceSync(conn, client, settings)
-    reports = []
-    if args.space:
-        if args.metadata_only:
-            reports.append(syncer.run_metadata(args.space))
-        else:
-            mode = "incremental" if args.changed_only else "full" if args.reconcile else "auto"
-            reports.append(syncer.run(args.space, mode))
+    reports: list = []
+    if args.space or args.all:
+        spaces = args.space or list(ctx.settings.sync.spaces)
+        if not spaces:
+            raise ConfexError(
+                "INVALID_ARGUMENT", "no spaces given and [sync].spaces is empty", ins.EXIT_USAGE
+            )
+        mode = "incremental" if args.changed_only else "full" if args.reconcile else "auto"
+        for space_key in spaces:
+            try:
+                if args.metadata_only:
+                    reports.append(syncer.run_metadata(space_key))
+                else:
+                    reports.append(syncer.run(space_key, mode))
+            except AuthenticationError:
+                raise
+            except (ConfluenceError, SyncLockedError) as exc:
+                # One space failing (lock held, space gone) must not stop the others.
+                conn.rollback()
+                reports.append(
+                    {"space_key": space_key, "status": "failed", "errors": [{"error": str(exc)}]}
+                )
     else:
         if args.metadata_only or args.changed_only:
             raise ConfexError(

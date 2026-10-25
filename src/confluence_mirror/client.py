@@ -200,10 +200,6 @@ class ConfluenceClient:
         kind = re.sub(r"/\d+", "/{id}", path)
         self.request_counts[kind] = self.request_counts.get(kind, 0) + 1
 
-    @property
-    def request_count(self) -> int:
-        return sum(self.request_counts.values())
-
     def _get(self, path_or_url: str, params: dict[str, Any] | None, *, stream: bool = False):
         url = self.url_for(path_or_url)
         attempt = 0

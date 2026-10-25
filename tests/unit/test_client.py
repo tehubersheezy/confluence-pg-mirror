@@ -196,7 +196,6 @@ def test_throttle_spaces_requests_and_counts_them():
         client.get_content(1001, expand="version")
     assert sleeps == [0.25, 0.25]
     assert client.request_counts == {"/rest/api/content/{id}": 3}
-    assert client.request_count == 3
 
     unthrottled = ConfluenceClient(
         ConfluenceSettings(base_url=fake.base_url, max_requests_per_second=0),
