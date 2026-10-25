@@ -1,0 +1,30 @@
+{
+  "profile_id": "service_inventory",
+  "version": "1.0.0",
+  "description": "Header-row tables listing services or applications.",
+  "families": ["inventory"],
+  "representations": ["storage", "export_view"],
+  "schema": "service_inventory.v1",
+  "template": {"header": "first_row", "required_fields": ["service_name"], "min_bound_columns": 2},
+  "header_bindings": {
+    "service_name": ["service", "service name", "application", "application name", "app", "system"],
+    "environment": ["environment", "env"],
+    "owner_team": ["owner", "owner team", "team", "owned by"],
+    "tier": ["tier", "criticality"],
+    "url": ["url", "link", "endpoint"],
+    "hosts": ["hosts", "servers", "nodes"],
+    "description": ["description", "purpose", "notes"]
+  },
+  "record_granularity": {"per_row": true},
+  "multivalue": {"hosts": {"grammar": "list", "separators": [",", ";", "\n"]}},
+  "context_inheritance": [
+    {"field": "environment", "from": "heading",
+     "pattern": "(?i)\\b(production|prod|staging|stage|test|development|dev|dr|qa|uat)\\b"}
+  ],
+  "relationships": {"runs_on": {"from_field": "hosts"}},
+  "required_evidence": ["cell", "heading"],
+  "chunking": {"max_rows": 40, "nested": "separate_units"},
+  "privacy_policy": "default",
+  "review": {"require_human_approval": true, "export_blocking_issues": ["model_inferred"]},
+  "extractor": {"default": "rules", "allow_model": true, "effort": "medium"}
+}

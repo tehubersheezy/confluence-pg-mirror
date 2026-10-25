@@ -7,12 +7,17 @@ read from the environment (``CONFLUENCE_PAT``), optionally populated from a loca
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from confluence_mirror.extraction.privacy import PrivacyPolicy
+from confluence_mirror.extraction.provider import ModelSettings
+
 PAT_ENV = "CONFLUENCE_PAT"
+_SECRET_KEYS = ("api_key", "key", "token", "password", "secret")
 
 
 class ConfigError(Exception):
@@ -38,6 +43,33 @@ class SyncSettings:
     incremental_overlap_minutes: int = 1440
     refresh_unchanged_metadata: bool = False
     attachment_dir: str | None = None
+    # Body representations fetched per page; storage is always required.
+    representations: tuple[str, ...] = ("storage", "export_view", "view")
+
+
+@dataclass(frozen=True)
+class BudgetSettings:
+    max_requests: int | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_cost_usd: float | None = None
+    per_item_retries: int = 1  # semantic repair attempts per unit
+
+
+@dataclass(frozen=True)
+class ExtractionSettings:
+    default_profile: str | None = None
+    registry_dirs: tuple[str, ...] = ()
+    extractor: str = "auto"  # auto | rules | model
+
+
+@dataclass(frozen=True)
+class ConfexSettings:
+    model: ModelSettings = field(default_factory=ModelSettings)
+    privacy: PrivacyPolicy = field(default_factory=PrivacyPolicy)
+    extraction: ExtractionSettings = field(default_factory=ExtractionSettings)
+    budgets: BudgetSettings = field(default_factory=BudgetSettings)
+    pricing: dict[str, dict] = field(default_factory=dict)  # model id -> dated prices
 
 
 @dataclass(frozen=True)
@@ -45,6 +77,7 @@ class Settings:
     confluence: ConfluenceSettings | None
     dsn: str
     sync: SyncSettings = field(default_factory=SyncSettings)
+    confex: ConfexSettings = field(default_factory=ConfexSettings)
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -85,7 +118,11 @@ def _validate_base_url(url: str) -> str:
 
 
 def load_settings(
-    path: Path | None, env: dict[str, str] | None = None, *, require_confluence: bool = True
+    path: Path | None,
+    env: dict[str, str] | None = None,
+    *,
+    require_confluence: bool = True,
+    require_dsn: bool = True,
 ) -> Settings:
     env = os.environ if env is None else env
     data: dict = {}
@@ -127,20 +164,82 @@ def load_settings(
 
     db = data.get("database", {})
     dsn = env.get("CONFLUENCE_MIRROR_DSN") or db.get("dsn") or ""
-    if not dsn:
+    if not dsn and require_dsn:
         raise ConfigError("database.dsn (or CONFLUENCE_MIRROR_DSN) is required")
 
     sync_raw = dict(data.get("sync", {}))
     unknown = set(sync_raw) - set(SyncSettings.__dataclass_fields__)
     if unknown:
         raise ConfigError(f"unknown [sync] keys: {', '.join(sorted(unknown))}")
-    for key in ("spaces", "content_types"):
+    for key in ("spaces", "content_types", "representations"):
         if key in sync_raw:
             sync_raw[key] = tuple(sync_raw[key])
     sync = SyncSettings(**sync_raw)
     bad_types = set(sync.content_types) - {"page", "blogpost"}
     if bad_types:
         raise ConfigError(f"unsupported content_types: {', '.join(sorted(bad_types))}")
+    bad_reps = set(sync.representations) - {"storage", "export_view", "view"}
+    if bad_reps or "storage" not in sync.representations:
+        raise ConfigError(
+            "sync.representations must include storage and only name storage, export_view, view"
+        )
     if not 0 < sync.max_delete_fraction <= 1:
         raise ConfigError("sync.max_delete_fraction must be in (0, 1]")
-    return Settings(confluence=confluence, dsn=dsn, sync=sync)
+    return Settings(confluence=confluence, dsn=dsn, sync=sync, confex=_confex_settings(data))
+
+
+def _section(data: dict, name: str, cls: type) -> dict:
+    raw = dict(data.get(name, {}))
+    for key in _SECRET_KEYS:
+        if key in raw:
+            raise ConfigError(
+                f"[{name}].{key} must not be stored in the config file; reference an "
+                "environment variable instead (e.g. [model] api_key_env)"
+            )
+    unknown = set(raw) - set(cls.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"unknown [{name}] keys: {', '.join(sorted(unknown))}")
+    return raw
+
+
+def _confex_settings(data: dict) -> ConfexSettings:
+    model_raw = _section(data, "model", ModelSettings)
+    model = ModelSettings(**model_raw)
+    if model.effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ConfigError("model.effort must be low, medium, high, xhigh or max")
+    if not model.endpoint.startswith("https://"):
+        raise ConfigError("model.endpoint must use https://")
+    if not 1 <= model.concurrency <= 16:
+        raise ConfigError("model.concurrency must be between 1 and 16")
+
+    priv_raw = dict(data.get("privacy", {}))
+    patterns = priv_raw.pop("redact_patterns", [])
+    priv_raw = _section({"privacy": priv_raw}, "privacy", PrivacyPolicy)
+    for key in ("allowed_spaces", "allowed_endpoints"):
+        if key in priv_raw:
+            priv_raw[key] = tuple(priv_raw[key])
+    extra = []
+    for item in patterns:
+        try:
+            re.compile(item["pattern"])
+        except (KeyError, TypeError, re.error) as exc:
+            raise ConfigError(f"privacy.redact_patterns entry is invalid: {exc}") from None
+        extra.append((str(item.get("name", "custom")), item["pattern"]))
+    priv_raw.pop("redactions", None)
+    privacy = PrivacyPolicy(**priv_raw, extra_redactions=tuple(extra))
+
+    ext_raw = _section(data, "extraction", ExtractionSettings)
+    if "registry_dirs" in ext_raw:
+        ext_raw["registry_dirs"] = tuple(ext_raw["registry_dirs"])
+    extraction = ExtractionSettings(**ext_raw)
+    if extraction.extractor not in ("auto", "rules", "model"):
+        raise ConfigError("extraction.extractor must be auto, rules or model")
+
+    budgets = BudgetSettings(**_section(data, "budgets", BudgetSettings))
+    pricing = {}
+    for model_id, price in (data.get("pricing") or {}).items():
+        missing = {"input_per_mtok", "output_per_mtok", "as_of"} - set(price)
+        if missing:
+            raise ConfigError(f"[pricing.{model_id}] needs {', '.join(sorted(missing))}")
+        pricing[model_id] = dict(price)
+    return ConfexSettings(model, privacy, extraction, budgets, pricing)

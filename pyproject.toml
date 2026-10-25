@@ -26,16 +26,25 @@ dependencies = [
 [project.optional-dependencies]
 # Use the operating system trust store (macOS Keychain) for corporate CAs.
 truststore = ["truststore>=0.9"]
-dev = ["pytest>=8", "ruff>=0.5"]
+# Claude extraction (confex extract with a model). Pure-Python wheels plus prebuilt
+# pydantic-core/jiter wheels for macOS; no compiler or conda needed.
+model = ["anthropic>=2.3,<3"]
+dev = ["pytest>=8", "ruff>=0.5", "anthropic>=2.3,<3"]
 
 [project.scripts]
 confluence-mirror = "confluence_mirror.cli:main"
+confex = "confluence_mirror.confex:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 confluence_mirror = ["migrations/*.sql"]
+"confluence_mirror.extraction" = [
+  "registry/schemas/*.json",
+  "registry/profiles/*.json",
+  "prompts/*.txt",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

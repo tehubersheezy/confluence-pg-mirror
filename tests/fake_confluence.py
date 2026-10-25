@@ -207,15 +207,14 @@ class FakeConfluence:
                 "tinyui": f"/x/{page.id}",
             },
         }
-        if "body.storage" in expand:
-            data["body"] = {
-                "storage": {"value": page.body, "representation": "storage"},
-                "view": {"value": f"<div class='view'>{page.body}</div>", "representation": "view"},
-                "export_view": {
-                    "value": f"<div class='export'>{page.body}</div>",
-                    "representation": "export_view",
-                },
-            }
+        bodies = {
+            "storage": page.body,
+            "view": f"<div class='view'>{page.body}</div>",
+            "export_view": f"<div class='export'>{page.body}</div>",
+        }
+        wanted = {r for r in bodies if f"body.{r}" in expand.split(",")}
+        if wanted:
+            data["body"] = {r: {"value": bodies[r], "representation": r} for r in sorted(wanted)}
         if "restrictions" in expand:
             data["restrictions"] = self._restriction_block(page)
         return data
@@ -240,6 +239,25 @@ class FakeConfluence:
                 f"?version={att.version}&api=v2"
             },
         }
+
+    def _cql(self, cql: str, expand: str) -> list[dict]:
+        """A tiny CQL subset: clauses joined by AND over type, space, parent, ancestor, title~."""
+        pages = [p for p in self.pages.values() if p.status == "current"]
+        for clause in re.split(r"\s+AND\s+", cql.strip("() ")):
+            clause = clause.strip("() ")
+            if m := re.fullmatch(r'type\s*=\s*"?(\w+)"?', clause):
+                pages = [p for p in pages if p.type == m.group(1)]
+            elif m := re.fullmatch(r'space\s*=\s*"([^"]+)"', clause):
+                pages = [p for p in pages if p.space_key == m.group(1)]
+            elif m := re.fullmatch(r"parent\s*=\s*(\d+)", clause):
+                pages = [p for p in pages if p.parent_id == int(m.group(1))]
+            elif m := re.fullmatch(r"ancestor\s*=\s*(\d+)", clause):
+                pages = [p for p in pages if int(m.group(1)) in {a.id for a in self._ancestors(p)}]
+            elif m := re.fullmatch(r'title\s*~\s*"([^"]+)"', clause):
+                pages = [p for p in pages if m.group(1).lower() in p.title.lower()]
+            else:
+                raise AssertionError(f"fake CQL cannot parse {clause!r}")
+        return [self.content_json(p, expand) for p in sorted(pages, key=lambda p: p.id)]
 
     # -- HTTP ---------------------------------------------------------------------------
 
@@ -310,6 +328,18 @@ class FakeConfluence:
                 and p.id not in self.hide_from_listing
             ]
             return self._paginate(request, items)
+        if path == "/rest/api/space":
+            items = []
+            for key in sorted(self.spaces):
+                space = self.spaces[key]
+                if params.get("type") and space["type"] != params.get("type"):
+                    continue
+                out = {k: space[k] for k in ("id", "key", "name", "type", "status")}
+                out["description"] = {"plain": {"value": space["description"]}}
+                items.append(out)
+            return self._paginate(request, items)
+        if path == "/rest/api/content/search" and "lastmodified" not in params.get("cql", ""):
+            return self._paginate(request, self._cql(unquote(params.get("cql", "")), expand))
         if path == "/rest/api/content/search":
             cql = unquote(params.get("cql", ""))
             space = re.search(r'space = "([^"]+)"', cql).group(1)
@@ -349,6 +379,16 @@ class FakeConfluence:
                         for i, (k, v) in enumerate(sorted(page.properties.items()))
                     ],
                 )
+            if sub == "/child/page":
+                children = sorted(
+                    (
+                        c
+                        for c in self.pages.values()
+                        if c.parent_id == page.id and c.status == "current"
+                    ),
+                    key=lambda c: c.id,
+                )
+                return self._paginate(request, [self.content_json(c, expand) for c in children])
             if sub == "/child/attachment":
                 return self._paginate(
                     request, [self.attachment_json(page, a) for a in page.attachments]

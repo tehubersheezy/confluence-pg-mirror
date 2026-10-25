@@ -1,0 +1,13 @@
+{
+  "schema_id": "key_value_config",
+  "version": "1",
+  "description": "Configuration documented as key/value pairs.",
+  "record_kinds": ["setting"],
+  "identity_fields": ["key", "section"],
+  "fields": {
+    "key": {"type": "string", "required": true},
+    "value": {"type": "string"},
+    "section": {"type": "string"}
+  },
+  "relationships": {}
+}

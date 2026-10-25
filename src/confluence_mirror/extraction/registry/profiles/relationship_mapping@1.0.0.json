@@ -1,0 +1,30 @@
+{
+  "profile_id": "relationship_mapping",
+  "version": "1.0.0",
+  "description": "Tables whose columns name a source, an explicit relationship and a target.",
+  "families": ["relationship_mapping"],
+  "representations": ["storage", "export_view"],
+  "schema": "relationship_mapping.v1",
+  "template": {"header": "first_row", "required_fields": ["source", "predicate", "target"],
+               "min_bound_columns": 3},
+  "header_bindings": {
+    "source": ["source", "from", "component"],
+    "predicate": ["relationship", "relation", "predicate", "type"],
+    "target": ["target", "to", "dependency", "depends on"],
+    "notes": ["notes", "comment"]
+  },
+  "value_maps": {
+    "predicate": {"depends on": "depends_on", "depends_on": "depends_on", "runs on": "runs_on",
+                  "runs_on": "runs_on", "owned by": "owned_by", "owned_by": "owned_by",
+                  "connects to": "connects_to", "connects_to": "connects_to"}
+  },
+  "record_granularity": {"per_row": true},
+  "multivalue": {},
+  "context_inheritance": [],
+  "relationships": {},
+  "required_evidence": ["cell"],
+  "chunking": {"max_rows": 40, "nested": "separate_units"},
+  "privacy_policy": "default",
+  "review": {"require_human_approval": true, "export_blocking_issues": ["model_inferred"]},
+  "extractor": {"default": "rules", "allow_model": true, "effort": "medium"}
+}

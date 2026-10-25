@@ -37,3 +37,56 @@ incremental_overlap_minutes = 1440
 refresh_unchanged_metadata = false
 # Optional: download attachment binaries to this directory (metadata is always mirrored).
 # attachment_dir = "./attachments"
+# Body representations fetched per page (storage is required).
+# representations = ["storage", "export_view", "view"]
+
+# ---------------------------------------------------------------------------------------
+# confex extraction. Everything below is optional; the defaults never send text anywhere.
+# ---------------------------------------------------------------------------------------
+
+[model]
+# Claude through the official Anthropic SDK: pip install 'confluence-pg-mirror[model]'.
+provider = "anthropic"
+model = "claude-haiku-5-5"
+effort = "medium"             # low | medium | high
+max_output_tokens = 16000      # leaves room for adaptive thinking plus the JSON result
+endpoint = "https://api.anthropic.com"
+# The key is read from this environment variable; never put a key in this file.
+api_key_env = "ANTHROPIC_API_KEY"
+timeout_seconds = 120
+concurrency = 2
+
+[privacy]
+# Model egress stays off until your organization has approved it. A CLI flag cannot
+# override this. Record the approval (ticket, policy ID) when you turn it on.
+egress_approved = false
+approval_reference = ""
+# Restrict egress to these spaces (empty = any space the mirror holds).
+allowed_spaces = []
+allowed_endpoints = ["https://api.anthropic.com"]
+# Keep the exact request and final output of every model call (needed for full lineage).
+retain_requests = true
+# Extra redaction rules, applied before token estimation and transmission. Credentials,
+# AWS access keys, private keys and bearer tokens are redacted by default.
+# redact_patterns = [{ name = "ticket", pattern = "TCK-[0-9]+" }]
+
+[extraction]
+# default_profile = "host_inventory@1.0.0"
+# Extra schema/profile directories (each with schemas/ and profiles/ subdirectories).
+# registry_dirs = ["./my-registry"]
+extractor = "auto"             # auto | rules | model
+
+[budgets]
+# Hard ceilings per run; unset means unlimited. A monetary limit needs a dated price.
+# max_requests = 200
+# max_input_tokens = 2000000
+# max_output_tokens = 1000000
+# max_cost_usd = 5.0
+per_item_retries = 1           # semantic repair attempts per unit
+
+# Dated provider prices (USD per million tokens). Without one, costs report as unknown.
+# Check current prices before relying on these; they change.
+# [pricing."claude-haiku-5-5"]
+# input_per_mtok = 0.10
+# output_per_mtok = 0.50
+# as_of = "2026-10-06"

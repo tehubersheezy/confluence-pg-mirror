@@ -1,0 +1,21 @@
+{
+  "profile_id": "key_value_config",
+  "version": "1.0.0",
+  "description": "Key/value tables: header cells down the first column, values beside them.",
+  "families": ["key_value"],
+  "representations": ["storage", "export_view"],
+  "schema": "key_value_config.v1",
+  "template": {"header": "first_column", "required_fields": ["key"], "min_bound_columns": 0},
+  "header_bindings": {},
+  "record_granularity": {"per_row": true},
+  "multivalue": {},
+  "context_inheritance": [
+    {"field": "section", "from": "heading_text"}
+  ],
+  "relationships": {},
+  "required_evidence": ["cell", "heading"],
+  "chunking": {"max_rows": 60, "nested": "separate_units"},
+  "privacy_policy": "default",
+  "review": {"require_human_approval": true, "export_blocking_issues": ["model_inferred"]},
+  "extractor": {"default": "rules", "allow_model": true, "effort": "low"}
+}

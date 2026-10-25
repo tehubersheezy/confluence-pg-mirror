@@ -1,0 +1,16 @@
+{
+  "schema_id": "ownership_mapping",
+  "version": "1",
+  "description": "Who owns what, as documented.",
+  "record_kinds": ["ownership"],
+  "identity_fields": ["subject", "owner"],
+  "fields": {
+    "subject": {"type": "string", "required": true},
+    "subject_kind": {"type": "enum", "values": ["service", "host", "application", "system", "other"]},
+    "owner": {"type": "string", "required": true},
+    "owner_kind": {"type": "enum", "values": ["team", "person", "other"]},
+    "role": {"type": "string"},
+    "contact": {"type": "email"}
+  },
+  "relationships": {}
+}

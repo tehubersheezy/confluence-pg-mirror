@@ -30,11 +30,11 @@ import psycopg
 from confluence_mirror import models
 from confluence_mirror import repository as repo
 from confluence_mirror.client import (
-    CONTENT_EXPAND_FULL,
     ConfluenceClient,
     ConfluenceError,
     ForbiddenError,
     NotFoundError,
+    content_expand,
 )
 from confluence_mirror.config import SyncSettings
 from confluence_mirror.extract import EXTRACTOR_VERSION, extract
@@ -92,12 +92,28 @@ class SpaceSync:
         self.conn = conn
         self.client = client
         self.settings = settings
+        self._expand = content_expand(settings.representations)
 
     # -- entry point ----------------------------------------------------------------
 
     def run(self, space_key: str, mode: str = "auto") -> SyncReport:
         if mode not in ("auto", "full", "incremental"):
             raise ValueError(f"unknown mode {mode}")
+        return self._locked(space_key, lambda: self._run_locked(space_key, mode))
+
+    def run_pages(self, space_key: str, page_ids: list[int]) -> SyncReport:
+        """Fetch selected pages of one space (mode ``pages``).
+
+        No deletion phase and no cursor advance: a page that cannot be fetched is an error
+        for this run, never evidence of deletion.
+        """
+        return self._locked(space_key, lambda: self._run_scoped(space_key, "pages", page_ids))
+
+    def run_metadata(self, space_key: str) -> SyncReport:
+        """List the space and record page metadata only (mode ``metadata``); no bodies."""
+        return self._locked(space_key, lambda: self._run_scoped(space_key, "metadata", None))
+
+    def _locked(self, space_key: str, body):
         if not SPACE_KEY_RE.match(space_key):
             raise ValueError(f"invalid space key: {space_key!r}")
         lock_key = f"confluence-mirror:space:{space_key}"
@@ -108,11 +124,53 @@ class SpaceSync:
         if not locked:
             raise SyncLockedError(f"space {space_key} is already being synced")
         try:
-            return self._run_locked(space_key, mode)
+            return body()
         finally:
             self.conn.rollback()
             self.conn.execute("SELECT pg_advisory_unlock(hashtext(%s))", (lock_key,))
             self.conn.commit()
+
+    def _run_scoped(self, space_key: str, mode: str, page_ids: list[int] | None) -> SyncReport:
+        run_id = repo.start_run(self.conn, space_key, mode, None)
+        self.conn.commit()
+        report = SyncReport(run_id, space_key, mode, "running", Counters())
+        try:
+            space = models.space_row(self.client.get_space(space_key))
+            repo.upsert_space(self.conn, space, run_id)
+            self.conn.commit()
+            if mode == "pages":
+                for page_id in page_ids or []:
+                    try:
+                        self._fetch_page(page_id, space["space_id"], report)
+                    except Exception as exc:
+                        self.conn.rollback()
+                        report.counters.pages_failed += 1
+                        self._error(report, page_id, "page", exc)
+                repo.resolve_links(self.conn, space["space_id"])
+            else:
+                for content_type in self.settings.content_types:
+                    for item in self.client.list_content(space_key, content_type):
+                        report.counters.pages_listed += 1
+                        listed = models.page_row(item)
+                        with self.conn.transaction():
+                            if repo.update_page_from_listing(self.conn, listed, run_id):
+                                report.counters.pages_moved += 1
+                            labels, complete = models.listing_labels(item)
+                            if complete:
+                                repo.replace_labels(
+                                    self.conn, listed["page_id"], models.label_rows(labels), run_id
+                                )
+                report.stats["deletions_evaluated"] = False
+            self.conn.commit()
+        except Exception as exc:
+            self.conn.rollback()
+            report.status = "failed"
+            self._error(report, None, "run", exc)
+            self._finish(report)
+            raise
+        report.status = "succeeded" if not report.errors else "partial"
+        self._finish(report)
+        return report
 
     def _run_locked(self, space_key: str, mode: str) -> SyncReport:
         abandoned = repo.abandon_stale_runs(self.conn, space_key)
@@ -226,7 +284,7 @@ class SpaceSync:
     def _fetch_page(self, page_id: int, space_id: int, report: SyncReport) -> None:
         run_id = report.sync_run_id
         # Network first, then one short transaction, so no transaction spans HTTP calls.
-        content = self.client.get_content(page_id, expand=CONTENT_EXPAND_FULL)
+        content = self.client.get_content(page_id, expand=self._expand)
         labels = models.label_rows(list(self.client.labels(page_id)))
         props = [models.property_row(p) for p in self.client.content_properties(page_id)]
         attachments = [models.attachment_row(a, page_id) for a in self.client.attachments(page_id)]
@@ -245,7 +303,11 @@ class SpaceSync:
             if repo.upsert_page(self.conn, page, run_id):
                 report.counters.pages_moved += 1
             repo.insert_version(self.conn, models.version_row(content), run_id)
-            repo.upsert_content(self.conn, models.content_row(content), run_id)
+            changed = repo.upsert_content(self.conn, models.content_row(content), run_id)
+            if changed:  # same version, different body: archived, never silently lost
+                report.stats.setdefault("same_version_body_changed", []).append(
+                    {"page_id": page_id, "representations": changed}
+                )
             repo.replace_labels(self.conn, page_id, labels, run_id)
             repo.replace_page_properties(self.conn, page_id, props, run_id)
             repo.replace_restrictions(self.conn, page_id, restrictions, run_id)

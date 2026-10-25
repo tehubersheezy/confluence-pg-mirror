@@ -1,0 +1,24 @@
+{
+  "profile_id": "ownership_mapping",
+  "version": "1.0.0",
+  "description": "Two or more columns mapping a subject to its owner.",
+  "families": ["ownership_mapping", "inventory"],
+  "representations": ["storage", "export_view"],
+  "schema": "ownership_mapping.v1",
+  "template": {"header": "first_row", "required_fields": ["subject", "owner"], "min_bound_columns": 2},
+  "header_bindings": {
+    "subject": ["subject", "component", "asset", "item"],
+    "owner": ["owner", "owned by", "responsible", "accountable", "team"],
+    "role": ["role", "responsibility"],
+    "contact": ["contact", "email", "e-mail"]
+  },
+  "record_granularity": {"per_row": true},
+  "multivalue": {},
+  "context_inheritance": [],
+  "relationships": {},
+  "required_evidence": ["cell"],
+  "chunking": {"max_rows": 40, "nested": "separate_units"},
+  "privacy_policy": "default",
+  "review": {"require_human_approval": true, "export_blocking_issues": ["model_inferred"]},
+  "extractor": {"default": "rules", "allow_model": true, "effort": "medium"}
+}

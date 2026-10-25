@@ -1,0 +1,90 @@
+{
+  "dataset": "synthetic_v1",
+  "description": "Synthetic, hand-labelled tables for regression evaluation. No real data.",
+  "split": "development",
+  "cases": [
+    {
+      "case_id": "inventory-rowspan",
+      "family": "inventory",
+      "profile": "host_inventory",
+      "body": "<h2>Production</h2><table><tr><th>Service</th><th>Host</th><th>IP</th></tr><tr><td rowspan=\"2\">Billing</td><td>bill01</td><td>10.1.0.1</td></tr><tr><td>bill02</td><td>10.1.0.2</td></tr></table>",
+      "expected": {
+        "records": [
+          {"hostname": "bill01", "ip_address": ["10.1.0.1"], "service": "Billing", "environment": "Production"},
+          {"hostname": "bill02", "ip_address": ["10.1.0.2"], "service": "Billing", "environment": "Production"}
+        ],
+        "ambiguities": []
+      }
+    },
+    {
+      "case_id": "inventory-host-list",
+      "family": "inventory",
+      "profile": "host_inventory",
+      "body": "<table><tr><th>Servers</th><th>Environment</th></tr><tr><td>db01, db02</td><td>DR</td></tr></table>",
+      "expected": {
+        "records": [
+          {"hostname": "db01", "environment": "DR"},
+          {"hostname": "db02", "environment": "DR"}
+        ],
+        "ambiguities": []
+      }
+    },
+    {
+      "case_id": "inventory-unpaired-lists",
+      "family": "inventory",
+      "profile": "host_inventory",
+      "body": "<table><tr><th>Hosts</th><th>IPs</th></tr><tr><td>a1, a2</td><td>10.0.0.1, 10.0.0.2</td></tr></table>",
+      "expected": {
+        "records": [{"hostname": "a1"}, {"hostname": "a2"}],
+        "ambiguities": ["MULTIVALUE_ALIGNMENT_AMBIGUOUS"]
+      }
+    },
+    {
+      "case_id": "inventory-range-not-expanded",
+      "family": "inventory",
+      "profile": "host_inventory",
+      "body": "<table><tr><th>Host</th><th>OS</th></tr><tr><td>web01-web10</td><td>Linux</td></tr></table>",
+      "expected": {"records": [], "ambiguities": ["RANGE_NOT_EXPANDED"]}
+    },
+    {
+      "case_id": "key-value-settings",
+      "family": "key_value",
+      "profile": "key_value_config",
+      "body": "<h3>Listener</h3><table><tr><th>Port</th><td>1521</td></tr><tr><th>Protocol</th><td>TCP</td></tr></table>",
+      "expected": {
+        "records": [
+          {"key": "Port", "value": "1521", "section": "Listener"},
+          {"key": "Protocol", "value": "TCP", "section": "Listener"}
+        ],
+        "ambiguities": []
+      }
+    },
+    {
+      "case_id": "ownership",
+      "family": "ownership_mapping",
+      "profile": "ownership_mapping",
+      "body": "<table><tr><th>Component</th><th>Owner</th><th>Contact</th></tr><tr><td>Payments API</td><td>Team Orbit</td><td>orbit@example.com</td></tr></table>",
+      "expected": {
+        "records": [{"subject": "Payments API", "owner": "Team Orbit", "contact": "orbit@example.com"}],
+        "ambiguities": []
+      }
+    },
+    {
+      "case_id": "relationships",
+      "family": "relationship_mapping",
+      "profile": "relationship_mapping",
+      "body": "<table><tr><th>Source</th><th>Relationship</th><th>Target</th></tr><tr><td>Checkout</td><td>depends on</td><td>Payments API</td></tr></table>",
+      "expected": {
+        "records": [{"source": "Checkout", "predicate": "depends_on", "target": "Payments API"}],
+        "ambiguities": []
+      }
+    },
+    {
+      "case_id": "layout-not-extracted",
+      "family": "layout",
+      "profile": null,
+      "body": "<table><tr><td><p>Intro</p><table><tr><th>Host</th></tr><tr><td>z1</td></tr></table></td></tr></table>",
+      "expected": {"records": [], "ambiguities": [], "classification": "unsupported"}
+    }
+  ]
+}

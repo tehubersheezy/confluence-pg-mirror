@@ -1,4 +1,5 @@
 import os
+import re
 
 import pytest
 
@@ -111,3 +112,44 @@ def test_shipped_template_is_valid():
     settings = load_settings(template, env={})
     assert settings.sync.spaces == ("DEMO",)
     assert settings.confluence.use_system_truststore is False
+
+
+def _confex(tmp_path, text):
+    path = tmp_path / "c.toml"
+    path.write_text(text)
+    return load_settings(
+        path, {"CONFLUENCE_MIRROR_DSN": "postgresql:///x"}, require_confluence=False
+    ).confex
+
+
+def test_confex_sections(tmp_path):
+    c = _confex(
+        tmp_path,
+        '[model]\neffort = "low"\n[privacy]\negress_approved = true\n'
+        'approval_reference = "SEC-1"\nallowed_spaces = ["DEMO"]\n'
+        'redact_patterns = [{name = "ticket", pattern = "TCK-[0-9]+"}]\n'
+        "[budgets]\nmax_requests = 5\n"
+        '[pricing."claude-haiku-5-5"]\ninput_per_mtok = 0.1\noutput_per_mtok = 0.5\n'
+        'as_of = "2026-10-06"\n',
+    )
+    assert c.model.model == "claude-haiku-5-5" and c.model.effort == "low"
+    assert c.privacy.allowed_spaces == ("DEMO",)
+    assert ("ticket", "TCK-[0-9]+") in c.privacy.rules
+    assert c.budgets.max_requests == 5
+    assert c.pricing["claude-haiku-5-5"]["as_of"] == "2026-10-06"
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ('[model]\napi_key = "sk-ant-x"\n', "must not be stored"),
+        ('[model]\nendpoint = "http://api.anthropic.com"\n', "https"),
+        ('[privacy]\nredact_patterns = [{name = "x", pattern = "("}]\n', "redact_patterns"),
+        ('[pricing."m"]\ninput_per_mtok = 1\n', "needs"),
+        ("[budgets]\nmonthly = 3\n", "unknown [budgets]"),
+        ('[extraction]\nextractor = "magic"\n', "extractor"),
+    ],
+)
+def test_confex_sections_reject(tmp_path, text, message):
+    with pytest.raises(ConfigError, match=re.escape(message)):
+        _confex(tmp_path, text)
