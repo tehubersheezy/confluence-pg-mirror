@@ -19,7 +19,20 @@ from psycopg.types.json import Jsonb
 from confluence_mirror import __version__
 
 _JSON_COLUMNS = frozenset(
-    {"raw", "value", "parameters", "data", "header", "cells", "records", "errors", "stats"}
+    {
+        "raw",
+        "value",
+        "parameters",
+        "data",
+        "header",
+        "cells",
+        "records",
+        "errors",
+        "stats",
+        "document",
+        "diagnostics",
+        "heading_path",
+    }
 )
 
 
@@ -491,3 +504,316 @@ def resolve_links(conn, space_id: int | None = None) -> int:
         {"space": space_id},
     )
     return cur.rowcount
+
+
+# -- structural parse artifacts (confex) ----------------------------------------------------
+
+
+def stored_bodies(conn, page_id: int, version: int | None = None) -> dict | None:
+    """Bodies of one stored (page, version); the page's current version when ``version`` is
+    None. Returns None when no content row exists."""
+    row = conn.execute(
+        "SELECT c.page_id, c.version_number, c.body_storage, c.body_export_view, c.body_view, "
+        "c.fetched_at FROM source.page_content c JOIN source.pages p ON p.page_id = c.page_id "
+        "WHERE c.page_id = %(page)s "
+        "AND c.version_number = COALESCE(%(version)s::integer, p.current_version)",
+        {"page": page_id, "version": version},
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "page_id": row[0],
+        "version_number": row[1],
+        "bodies": {"storage": row[2], "export_view": row[3], "view": row[4]},
+        "fetched_at": row[5],
+    }
+
+
+def content_versions(conn, page_id: int) -> list[dict]:
+    cur = conn.execute(
+        "SELECT version_number, body_storage IS NOT NULL, body_export_view IS NOT NULL, "
+        "body_view IS NOT NULL, fetched_at FROM source.page_content WHERE page_id = %s "
+        "ORDER BY version_number",
+        (page_id,),
+    )
+    return [
+        {
+            "version_number": v,
+            "representations": [
+                name
+                for name, present in zip(("storage", "export_view", "view"), flags, strict=True)
+                if present
+            ],
+            "fetched_at": fetched,
+        }
+        for v, *flags, fetched in cur.fetchall()
+    ]
+
+
+def parse_targets(
+    conn, space_id: int | None, page_ids: Sequence[int] | None, all_versions: bool
+) -> list[tuple[int, int]]:
+    return [(p, v) for p, v, _ in page_versions_to_extract(conn, space_id, page_ids, all_versions)]
+
+
+def artifact_exists(conn, artifact_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM extracted.parse_artifacts WHERE artifact_id = %s", (artifact_id,)
+    ).fetchone()
+    return row is not None
+
+
+def insert_parse_artifact(conn, artifact: dict) -> bool:
+    """Store an artifact and its table index; False if it already existed (immutable)."""
+    cur = conn.execute(
+        "INSERT INTO extracted.parse_artifacts (artifact_id, snapshot_id, instance_id, page_id, "
+        "version_number, representation, body_sha256, parser_version, config_fingerprint, "
+        "status, table_count, document, diagnostics) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (artifact_id) DO NOTHING",
+        (
+            artifact["artifact_id"],
+            artifact["snapshot_id"],
+            artifact["instance_id"],
+            artifact["page_id"],
+            artifact["version_number"],
+            artifact["representation"],
+            artifact["body_sha256"],
+            artifact["parser_version"],
+            artifact["config_fingerprint"],
+            artifact["status"],
+            len(artifact["tables"]),
+            Jsonb(artifact),
+            Jsonb(artifact["diagnostics"]),
+        ),
+    )
+    if cur.rowcount == 0:
+        return False
+    for table in artifact["tables"]:
+        _insert(
+            conn,
+            "extracted.table_occurrences",
+            {
+                "table_id": table["table_id"],
+                "artifact_id": artifact["artifact_id"],
+                "page_id": artifact["page_id"],
+                "version_number": artifact["version_number"],
+                "representation": artifact["representation"],
+                **{
+                    k: table[k]
+                    for k in (
+                        "ordinal",
+                        "parent_table_id",
+                        "parent_cell_id",
+                        "depth",
+                        "element_path",
+                        "row_count",
+                        "column_count",
+                        "geometry_status",
+                        "extraction_eligible",
+                        "heading_path",
+                    )
+                },
+            },
+        )
+    return True
+
+
+def load_artifact(conn, artifact_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT document FROM extracted.parse_artifacts WHERE artifact_id = %s", (artifact_id,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def table_occurrence(conn, table_id: str) -> dict | None:
+    cur = conn.execute(
+        "SELECT table_id, artifact_id, page_id, version_number, representation, ordinal "
+        "FROM extracted.table_occurrences WHERE table_id = %s",
+        (table_id,),
+    )
+    return _one_dict(cur)
+
+
+def list_table_occurrences(
+    conn, space_id: int | None, page_id: int | None, nested: str, representation: str | None
+) -> list[dict]:
+    """Table occurrences of current, non-deleted page versions."""
+    cur = conn.execute(
+        "SELECT t.table_id, t.page_id, p.title, s.space_key, t.version_number, t.representation, "
+        "t.ordinal, t.depth, t.parent_table_id, t.row_count, t.column_count, "
+        "t.geometry_status, t.extraction_eligible, t.heading_path, t.artifact_id "
+        "FROM extracted.table_occurrences t "
+        "JOIN source.pages p ON p.page_id = t.page_id AND p.current_version = t.version_number "
+        "JOIN source.spaces s ON s.space_id = p.space_id "
+        "WHERE NOT p.is_deleted "
+        "AND (%(space)s::bigint IS NULL OR p.space_id = %(space)s) "
+        "AND (%(page)s::bigint IS NULL OR t.page_id = %(page)s) "
+        "AND (%(rep)s::text IS NULL OR t.representation = %(rep)s) "
+        "AND (%(nested)s = 'any' OR (%(nested)s = 'only') = (t.depth > 0)) "
+        "ORDER BY s.space_key, t.page_id, t.representation, t.ordinal, t.table_id",
+        {"space": space_id, "page": page_id, "rep": representation, "nested": nested},
+    )
+    return _dicts(cur)
+
+
+# -- mirror navigation (read-only) -----------------------------------------------------------
+
+# Deterministic sibling order: source position when known, then a normalized title, then ID.
+_PAGE_ORDER = "position NULLS LAST, lower(title), page_id"
+
+
+def _dicts(cur) -> list[dict]:
+    names = [d.name for d in cur.description]
+    return [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
+
+
+def _one_dict(cur) -> dict | None:
+    found = _dicts(cur)
+    return found[0] if found else None
+
+
+def list_spaces(conn) -> list[dict]:
+    cur = conn.execute(
+        "SELECT s.space_key, s.name, s.space_type, s.status, s.sync_enabled, "
+        "s.last_successful_sync_at, s.last_full_sync_at, "
+        "(SELECT count(*) FROM source.pages p WHERE p.space_id = s.space_id "
+        " AND NOT p.is_deleted) AS mirrored_pages, "
+        "(SELECT count(*) FROM extracted.table_occurrences t JOIN source.pages p "
+        " ON p.page_id = t.page_id AND p.current_version = t.version_number "
+        " WHERE p.space_id = s.space_id AND NOT p.is_deleted "
+        " AND t.representation = 'storage') AS parsed_storage_tables "
+        "FROM source.spaces s ORDER BY s.space_key"
+    )
+    return _dicts(cur)
+
+
+def get_space(conn, space_key: str) -> dict | None:
+    cur = conn.execute(
+        "SELECT space_id, space_key, name, space_type, status, description_plain, homepage_id, "
+        "sync_enabled, last_successful_sync_at, last_full_sync_at, last_seen_at "
+        "FROM source.spaces WHERE space_key = %s",
+        (space_key,),
+    )
+    return _one_dict(cur)
+
+
+def space_pages(conn, space_id: int) -> list[dict]:
+    """Metadata of every non-deleted page in a space (no bodies)."""
+    cur = conn.execute(
+        "SELECT page_id, title, parent_id, position, depth, content_type "
+        f"FROM source.pages WHERE space_id = %s AND NOT is_deleted ORDER BY {_PAGE_ORDER}",
+        (space_id,),
+    )
+    return _dicts(cur)
+
+
+def get_page(conn, page_id: int) -> dict | None:
+    cur = conn.execute(
+        "SELECT p.page_id, p.title, p.status, p.content_type, p.parent_id, p.ancestor_ids, "
+        "p.depth, p.position, p.current_version, p.last_modified_at, p.last_modified_by, "
+        "p.webui_path, p.last_seen_at, p.is_deleted, p.deleted_at, p.deletion_reason, "
+        "p.moved_at, s.space_key, s.space_id "
+        "FROM source.pages p JOIN source.spaces s ON s.space_id = p.space_id "
+        "WHERE p.page_id = %s",
+        (page_id,),
+    )
+    return _one_dict(cur)
+
+
+def page_children(conn, page_id: int) -> list[dict]:
+    cur = conn.execute(
+        "SELECT page_id, title, position, current_version FROM source.pages "
+        f"WHERE parent_id = %s AND NOT is_deleted ORDER BY {_PAGE_ORDER}",
+        (page_id,),
+    )
+    return _dicts(cur)
+
+
+def page_siblings(conn, page_id: int) -> list[dict]:
+    """Pages sharing the selected page's parent (or, for a root, the space's other roots)."""
+    cur = conn.execute(
+        "SELECT q.page_id, q.title, q.position FROM source.pages p "
+        "JOIN source.pages q ON q.space_id = p.space_id "
+        " AND q.parent_id IS NOT DISTINCT FROM p.parent_id "
+        "WHERE p.page_id = %s AND NOT q.is_deleted "
+        "ORDER BY q.position NULLS LAST, lower(q.title), q.page_id",
+        (page_id,),
+    )
+    return _dicts(cur)
+
+
+def page_ancestors(conn, page_id: int, max_depth: int = 1000) -> list[dict]:
+    """Chain from the page up to the furthest mirrored ancestor, nearest first.
+
+    Each row reports ``cycle`` when the walk revisits a page; the walk stops there.
+    """
+    cur = conn.execute(
+        "WITH RECURSIVE up (page_id, parent_id, title, n, path, cycle) AS ("
+        "  SELECT p.page_id, p.parent_id, p.title, 0, ARRAY[p.page_id], false "
+        "  FROM source.pages p WHERE p.page_id = %(page)s "
+        "  UNION ALL "
+        "  SELECT q.page_id, q.parent_id, q.title, up.n + 1, up.path || q.page_id, "
+        "         q.page_id = ANY(up.path) "
+        "  FROM up JOIN source.pages q ON q.page_id = up.parent_id "
+        "  WHERE NOT up.cycle AND up.n < %(max)s"
+        ") SELECT page_id, parent_id, title, n AS distance, cycle FROM up ORDER BY n",
+        {"page": page_id, "max": max_depth},
+    )
+    return _dicts(cur)
+
+
+def page_subtree(conn, root_id: int, max_depth: int) -> list[dict]:
+    """The root and its known descendants up to ``max_depth`` edges, with cycle detection."""
+    cur = conn.execute(
+        "WITH RECURSIVE down (page_id, parent_id, title, position, depth, path, cycle) AS ("
+        "  SELECT p.page_id, p.parent_id, p.title, p.position, 0, ARRAY[p.page_id], false "
+        "  FROM source.pages p WHERE p.page_id = %(root)s "
+        "  UNION ALL "
+        "  SELECT q.page_id, q.parent_id, q.title, q.position, down.depth + 1, "
+        "         down.path || q.page_id, q.page_id = ANY(down.path) "
+        "  FROM down JOIN source.pages q ON q.parent_id = down.page_id AND NOT q.is_deleted "
+        "  WHERE NOT down.cycle AND down.depth < %(max)s"
+        ") SELECT d.page_id, d.parent_id, d.title, d.position, d.depth, d.cycle, "
+        "  (SELECT count(*) FROM source.pages c WHERE c.parent_id = d.page_id "
+        "   AND NOT c.is_deleted) AS child_count "
+        "FROM down d ORDER BY d.depth, d.position NULLS LAST, lower(d.title), d.page_id",
+        {"root": root_id, "max": max_depth},
+    )
+    return _dicts(cur)
+
+
+def page_summary_counts(conn, page_id: int, version: int) -> dict:
+    row = conn.execute(
+        "SELECT "
+        "(SELECT count(*) FROM extracted.page_macros WHERE page_id = %(p)s "
+        " AND version_number = %(v)s), "
+        "(SELECT count(*) FROM extracted.page_links WHERE page_id = %(p)s "
+        " AND version_number = %(v)s), "
+        "(SELECT count(*) FROM source.attachments WHERE page_id = %(p)s AND NOT is_deleted), "
+        "(SELECT count(*) FROM source.access_restrictions WHERE page_id = %(p)s), "
+        "(SELECT count(*) FROM source.pages WHERE parent_id = %(p)s AND NOT is_deleted)",
+        {"p": page_id, "v": version},
+    ).fetchone()
+    labels = conn.execute(
+        "SELECT prefix, name FROM source.page_labels WHERE page_id = %s ORDER BY prefix, name",
+        (page_id,),
+    ).fetchall()
+    return {
+        "macros": row[0],
+        "links": row[1],
+        "attachments": row[2],
+        "direct_restrictions": row[3],
+        "children": row[4],
+        "labels": [f"{p}:{n}" if p != "global" else n for p, n in labels],
+    }
+
+
+def page_artifacts(conn, page_id: int, version: int) -> list[dict]:
+    cur = conn.execute(
+        "SELECT artifact_id, snapshot_id, representation, status, table_count, parser_version, "
+        "parsed_at FROM extracted.parse_artifacts WHERE page_id = %s AND version_number = %s "
+        "ORDER BY representation, parsed_at",
+        (page_id, version),
+    )
+    return _dicts(cur)

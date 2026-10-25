@@ -26,8 +26,15 @@ cli.py ──► sync.SpaceSync ──► client.ConfluenceClient   (HTTP, GET o
                ├──► models.py      (pure: API JSON → row dicts)
                ├──► repository.py  (all SQL; idempotent upserts)
                └──► extract/       (pure: storage XHTML → macros/tables/links)
+confex.py ──► inspection.py ──► repository.py            (offline; read-only except `parse`)
+                   └──► structure/ (pure: body → document artifact, table geometry, IDs)
 db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 ```
+
+- **confex** (`docs/confex.md`) never constructs an HTTP client. Navigation and inspection
+  set the connection read-only. Parse artifacts are immutable and content-addressed: bump
+  `structure.document.PARSER_VERSION` when artifact output changes, never update rows in
+  place.
 
 - **Layering.** `models` and `extract` do no I/O and are unit-tested exhaustively.
   `repository` owns every SQL statement. `sync` orchestrates and owns transactions. Keep SQL

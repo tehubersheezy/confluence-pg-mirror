@@ -51,6 +51,8 @@ rebuilt from `source` offline (`confluence-mirror extract`).
 | | `macro_extractions` | macro-specific structured data (JSONB) |
 | | `page_tables` | tables: cells with spans, header, records |
 | | `page_links` | outgoing links with resolved `target_page_id` |
+| | `parse_artifacts` | `confex` structural parses: document model per body capture (JSONB) |
+| | `table_occurrences` | `confex` table index: geometry status, nesting, heading path |
 | `sync` | `sync_runs` | one row per run: mode, status, counters, per-page errors |
 
 Views `extracted.current_page_content`, `current_page_macros`, `current_page_tables` and
@@ -142,6 +144,29 @@ confluence-mirror extract --space DEMO   # rebuild extracted.* offline
 
 Exit codes: `0` success, `1` configuration error, `2` partial (some pages failed; details in
 `sync.sync_runs.errors`), `3` failure, `4` authentication failure.
+
+### 6. Explore and inspect tables (`confex`)
+
+`confex` reads the mirror offline: it opens the database read-only and makes no network
+calls. Global options go before the subcommand.
+
+```bash
+confex spaces tree DEMO --depth 3 --counts
+confex pages ancestors 12345
+confex parse --space DEMO                   # persist structural artifacts (offline)
+confex pages outline 12345 --representation storage --tables --macros
+confex pages tables 12345 --representation storage
+confex tables show 12345:t02 --representation storage --view grid
+confex tables show 12345:t02 --representation storage --view cell --cell R3C1
+confex --format json tables show tbl_<id> --view physical
+```
+
+Views are `overview`, `grid`, `physical`, `cell`, `context` and `raw`. Merged cells appear as
+`covered:cN` slots that point at one physical cell. Nested tables are separate occurrences
+that are referenced from their parent cell. Malformed spans stay inspectable as `conflict`
+slots, with diagnostics. Exit codes: `0` ok, `2` usage, `3` not found, `4` unavailable,
+`5` ambiguous selector, `6` internal, `9` partial. See [docs/confex.md](docs/confex.md) for
+what is implemented and how the spec maps onto this schema.
 
 To schedule a sync, use `launchd` (user agents in `~/Library/LaunchAgents` need no admin) or
 `cron`.

@@ -38,6 +38,15 @@ def _entity(match: re.Match[str]) -> str:
 
 
 def parse_storage(storage: str) -> etree._Element:
+    return parse_storage_report(storage)[0]
+
+
+def parse_storage_report(storage: str) -> tuple[etree._Element, list[tuple[int, str]]]:
+    """Parse like :func:`parse_storage`, also returning the parser's recoveries.
+
+    Each recovery is ``(line, libxml2 error type)``; messages are dropped because they can
+    quote source text.
+    """
     text = _ENTITY_RE.sub(_entity, storage or "")
     wrapped = (
         f'<{ROOT_TAG} xmlns:ac="{AC_NS}" xmlns:ri="{RI_NS}" xmlns:at="{AT_NS}">{text}</{ROOT_TAG}>'
@@ -53,7 +62,7 @@ def parse_storage(storage: str) -> etree._Element:
     root = etree.fromstring(wrapped.encode("utf-8"), parser)
     if root is None:  # pragma: no cover - recover mode returns a root for any input
         root = etree.Element(ROOT_TAG)
-    return root
+    return root, [(e.line, e.type_name) for e in parser.error_log]
 
 
 def qname(el: etree._Element) -> str:

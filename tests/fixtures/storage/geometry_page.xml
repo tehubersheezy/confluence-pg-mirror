@@ -1,0 +1,25 @@
+<h1>Inventory</h1>
+<h3>Servers</h3>
+<p>Synthetic hosts for the example service.</p>
+<table><tbody>
+  <tr><th>Service</th><th>Environment</th><th>Servers</th></tr>
+  <tr><td rowspan="2">Example DB</td><td>Production</td><td>db01, db02</td></tr>
+  <tr><td>DR</td><td><p>see below</p><table><tbody><tr><td><h2>Inner heading</h2>dr01</td><td>dr02</td></tr></tbody></table><p>end</p></td></tr>
+</tbody></table>
+<p>Values are illustrative 🙂 only.</p>
+<h2>Groups</h2>
+<table>
+  <thead><tr><th rowspan="0">G</th><th>H1</th></tr><tr><th>H2</th></tr></thead>
+  <tbody><tr><td rowspan="0">A</td><td>x</td></tr><tr><td>y</td></tr></tbody>
+  <tfoot><tr><td colspan="2">footer</td></tr></tfoot>
+</table>
+<ac:layout><ac:layout-section ac:type="two_equal">
+  <ac:layout-cell><h2>Left column</h2><table><tbody><tr><td>left</td></tr></tbody></table></ac:layout-cell>
+  <ac:layout-cell><table><tbody><tr><td>right</td></tr></tbody></table></ac:layout-cell>
+</ac:layout-section></ac:layout>
+<ac:structured-macro ac:name="code" ac:schema-version="1"><ac:plain-text-body><![CDATA[<table><tr><td>not a table</td></tr></table>]]></ac:plain-text-body></ac:structured-macro>
+<table><tbody>
+  <tr><td>a</td><td rowspan="2">b</td></tr>
+  <tr><td colspan="2">overlaps</td></tr>
+  <tr><td rowspan="x">bad</td><td rowspan="5">long</td></tr>
+</tbody></table>
