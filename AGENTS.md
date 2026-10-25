@@ -58,10 +58,15 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
 - **Discovery is listing-driven, not CQL-driven.** Each run lists the entire space with
   cheap metadata, then diffs against the mirror. This catches moves (which don't bump the
   version), deletions (which never appear in "modified since" queries) and restores, without
-  depending on CQL date semantics or server time zones. CQL is used only as a supplement for
-  attachment changes, with a generous overlap window.
-- **Transactions.** Network calls for a page happen first, then one short transaction writes
-  it, so no transaction spans HTTP. Extraction runs in a savepoint inside that transaction:
+  depending on CQL date semantics or server time zones. CQL is used for attachment changes
+  (with a generous overlap window), for scoped syncs (`Scope`: pages, tree, cql), and to
+  fetch changed pages in `id in (...)` batches.
+- **Bulk first.** Rate limits are the binding constraint. Listing uses `/content/scan`;
+  bodies and metadata come in batches with expansions; per-page endpoints are fallbacks only
+  for truncated expansions or a failed batch. Don't add a per-page request to the common path
+  without a reason, and check `sync_runs.stats.http_requests` in tests when you touch it.
+- **Transactions.** Network calls for a page (or its batch) happen first, then one short
+  transaction per page writes it, so no transaction spans HTTP. Extraction runs in a savepoint inside that transaction:
   an extractor bug loses the derived rows, never the source rows.
 - **Failure semantics.** A page-level failure is recorded in `sync_runs.errors` and the run
   ends `partial`. A failure before the listing (space fetch, listing) ends `failed`. The
@@ -130,6 +135,13 @@ db.py: connections + versioned migrations (migrations/NNNN_name.sql)
   so `SpaceSync._probe` falls back to `status=trashed`, then no status.
 - `extensions.position` is an integer or the string `"none"`.
 - Attachment IDs are strings (`att123`); page and space IDs are numeric.
+- `/rest/api/content/scan` exists on DC 7.18+ (pages) and 8.3+ (blog posts). It pages by
+  `cursor` (`nextCursor`, or `_links.next` on some builds) and has no offset. Servers that
+  answer 400/404/405/501 get offset listing on `/rest/api/content`.
+- CQL search caps each page silently: 50 results with a body expansion, 200 with other
+  expansions, 1000 with none. Batches therefore request at most 50 bodies.
+- Embedded collections (`metadata.labels`, `children.attachment`) are truncated past their
+  limit; `models._expanded` reports that and the sync falls back to the per-page endpoint.
 - Restrictions expanded on content may be truncated. The sync falls back to
   `/restriction/byOperation` and records page IDs that were still incomplete in
   `sync_runs.stats.restrictions_incomplete`.

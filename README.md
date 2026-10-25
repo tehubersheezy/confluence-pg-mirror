@@ -21,6 +21,13 @@ PostgreSQL, Python ≥ 3.11 and a personal access token (PAT).
   interpretations (code, panels, Jira, include/excerpt, page properties, status, …); tables
   as cells and header-keyed records; links (page, attachment, user, space, URL, anchor,
   include). Every derived row records the page version, element path and extractor version.
+- **Bulk requests, gentle on rate limits**: the space is listed through `/content/scan`
+  (200 pages a request, cursor-paged), and changed pages are fetched 50 at a time with
+  bodies, labels, attachments and restrictions in one CQL `id in (...)` request. A
+  client-side limit (`max_requests_per_second`) spaces requests out. Each run records its
+  request counts in `sync_runs.stats.http_requests`.
+- **Scoped syncs**: one page tree (`--root`), a CQL search (`--cql`) or named pages
+  (`--page`), listed and fetched in bulk, without touching the rest of the space.
 - **Initial and incremental sync**: incremental mode fetches only new or changed pages. It
   also detects moves, trash, purges, permission loss and pages moved to another space, and
   picks up metadata-only changes (labels, new attachments).
@@ -141,6 +148,9 @@ confluence-mirror sync --space DEMO      # first run is a full import
 confluence-mirror sync --space DEMO      # later runs are incremental
 confluence-mirror sync --all             # every space in [sync].spaces
 confluence-mirror sync --space DEMO --full
+confluence-mirror sync --root 12345      # one page tree (new or changed pages only)
+confluence-mirror sync --cql 'space = DEMO and label = "runbook"'
+confluence-mirror sync --page 12345      # named pages, always re-fetched
 confluence-mirror runs --space DEMO      # recent sync runs as JSON
 confluence-mirror extract --space DEMO   # rebuild extracted.* offline
 ```
@@ -199,6 +209,25 @@ labels). It is compared to the mirror:
 Old versions are kept: `page_versions` and `page_content` grow by one row per version seen,
 and extraction rows are per version. The sync cursor only advances on a fully successful
 run. Failed pages keep their old stored version, so the next run retries them automatically.
+
+Scoped syncs (`--root`, `--cql`, `--page`) run in mode `pages`: they list only the selection,
+fetch what is new or changed (`--full` re-fetches it all), and never mark pages deleted or
+advance the space cursor.
+
+### Request budget and rate limits
+
+| Step | Requests |
+|---|---|
+| list a space of N pages | about N / 200 (`/content/scan`; offset `/content` paging on servers without it) |
+| fetch C new or changed pages | about C / 50 (`id in (...)` with every expansion) |
+| content properties, `page_properties = "all"` | one more per fetched page |
+| labels or attachments beyond the expansion limit | one more per affected page |
+
+Content properties have no bulk listing, so `page_properties = "all"` (the default) costs a
+request per fetched page. Set `page_properties = ["key1", "key2"]` to fetch named keys in
+the batch instead, or `"none"` to leave stored properties untouched. Requests are spaced to
+`max_requests_per_second` (default 5; `0` turns the limit off), and 429 responses are
+retried after `Retry-After`.
 
 Restrictions and content properties change without a version bump. Incremental runs refresh
 them only for changed pages, unless `refresh_unchanged_metadata = true` (slower). A

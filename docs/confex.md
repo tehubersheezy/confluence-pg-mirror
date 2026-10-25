@@ -43,6 +43,8 @@ prebuilt `pydantic-core`/`jiter` wheels for macOS, so no compiler is needed. Onl
 confex sync --space ITOPS --metadata-only
 confex spaces tree ITOPS --depth 3
 confex sync --page 12345 --representations storage,export_view
+confex sync --root 12345              # a page tree in bulk; --reconcile re-fetches it all
+confex sync --cql 'label = "hosts"'
 confex parse --page 12345 && confex align --page 12345
 confex pages outline 12345 --representation storage --tables --macros
 confex tables show 12345:t02 --representation storage --view grid

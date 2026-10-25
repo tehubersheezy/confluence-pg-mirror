@@ -9,7 +9,6 @@ from typing import Any
 from confluence_mirror import db, live
 from confluence_mirror import inspection as ins
 from confluence_mirror import repository as repo
-from confluence_mirror.client import NotFoundError
 from confluence_mirror.confex.core import (
     Context,
     Result,
@@ -25,7 +24,7 @@ from confluence_mirror.confex.core import (
 from confluence_mirror.confex.render import diag_lines, items_table, kv, table, tree_lines
 from confluence_mirror.inspection import ConfexError
 from confluence_mirror.structure import REPRESENTATIONS
-from confluence_mirror.sync import SpaceSync
+from confluence_mirror.sync import Scope, SpaceSync
 
 REP_CHOICES = ("auto", *REPRESENTATIONS)
 
@@ -51,6 +50,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     scope = s.add_mutually_exclusive_group(required=True)
     scope.add_argument("--space", metavar="KEY")
     scope.add_argument("--page", type=int, action="append", metavar="ID")
+    scope.add_argument("--root", type=int, metavar="ID", help="a page and all its descendants")
+    scope.add_argument("--cql", metavar="QUERY", help="every page a CQL search returns")
     mode = s.add_mutually_exclusive_group()
     mode.add_argument("--metadata-only", action="store_true", help="list pages; fetch no bodies")
     mode.add_argument("--changed-only", action="store_true", help="incremental space sync")
@@ -180,6 +181,15 @@ def parse_cmd(args, ctx: Context) -> Result:
     return Result(data, exit_code=ins.EXIT_PARTIAL if data["failed"] else ins.EXIT_OK)
 
 
+def sync_scope(args, *, full: bool) -> Scope:
+    """The bulk sync selection named by ``--page``/``--root``/``--cql``."""
+    if args.page:  # named pages are always re-fetched, as a repair tool
+        return Scope("pages", page_ids=tuple(args.page), full=True)
+    if getattr(args, "root", None) is not None:
+        return Scope("tree", root=args.root, full=full)
+    return Scope("cql", cql=getattr(args, "cql", None), full=full)
+
+
 @command("sync", writes=True, plain=_plain_counts)
 def sync_cmd(args, ctx: Context) -> Result:
     settings = ctx.settings.sync
@@ -199,19 +209,15 @@ def sync_cmd(args, ctx: Context) -> Result:
             mode = "incremental" if args.changed_only else "full" if args.reconcile else "auto"
             reports.append(syncer.run(args.space, mode))
     else:
-        if args.metadata_only or args.changed_only or args.reconcile:
-            raise ConfexError("ARGUMENT_CONFLICT", "--page takes no mode option", ins.EXIT_USAGE)
-        by_space: dict[str, list[int]] = {}
-        missing = []
-        for page_id in args.page:
-            try:
-                content = client.get_content(page_id, expand="space")
-            except NotFoundError:
-                missing.append(page_id)
-                continue
-            by_space.setdefault(content["space"]["key"], []).append(page_id)
-        for space_key, ids in sorted(by_space.items()):
-            reports.append(syncer.run_pages(space_key, ids))
+        if args.metadata_only or args.changed_only:
+            raise ConfexError(
+                "ARGUMENT_CONFLICT",
+                "--page/--root/--cql take only --reconcile",
+                ins.EXIT_USAGE,
+            )
+        scope = sync_scope(args, full=bool(args.reconcile))
+        found, missing = syncer.run_scope(scope)
+        reports.extend(found)
         if missing:
             reports.append(
                 {
@@ -222,6 +228,8 @@ def sync_cmd(args, ctx: Context) -> Result:
                     ],
                 }
             )
+        if not reports:
+            reports.append({"status": "succeeded", "note": "the selection matched no pages"})
     out: list[dict[str, Any]] = []
     for r in reports:
         d = r if isinstance(r, dict) else r.as_dict()

@@ -14,7 +14,7 @@ from confluence_mirror.client import AuthenticationError, ConfluenceClient, Conf
 from confluence_mirror.config import ConfigError, get_pat, load_dotenv, load_settings
 from confluence_mirror.logging_utils import redact, setup_logging
 from confluence_mirror.repository import recent_runs
-from confluence_mirror.sync import SpaceSync, SyncLockedError, reextract
+from confluence_mirror.sync import Scope, SpaceSync, SyncLockedError, reextract
 
 log = logging.getLogger("confluence_mirror")
 
@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     target = sp.add_mutually_exclusive_group(required=True)
     target.add_argument("--space", action="append", metavar="KEY", help="space key (repeatable)")
     target.add_argument("--all", action="store_true", help="every space in [sync].spaces")
+    target.add_argument(
+        "--page", type=int, action="append", metavar="ID", help="one page (repeatable)"
+    )
+    target.add_argument("--root", type=int, metavar="ID", help="a page and all its descendants")
+    target.add_argument("--cql", metavar="QUERY", help="every page a CQL search returns")
     mode = sp.add_mutually_exclusive_group()
     mode.add_argument(
         "--full", action="store_const", dest="mode", const="full", help="re-fetch every page"
@@ -160,6 +165,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             )
             return EXIT_OK
 
+        if args.page or args.root is not None or args.cql:
+            return _sync_scope(args, settings, client)
         spaces = args.space or list(settings.sync.spaces)
         if not spaces:
             raise ConfigError("no spaces given; use --space KEY or set [sync].spaces")
@@ -185,6 +192,44 @@ def _dispatch(args: argparse.Namespace) -> int:
                 if report.status != "succeeded":
                     worst = max(worst, EXIT_PARTIAL)
         return worst
+
+
+def _sync_scope(args, settings, client) -> int:
+    """``sync --page/--root/--cql``: bulk-list the selection, fetch what changed."""
+    if args.mode == "incremental":
+        raise ConfigError("--incremental applies to space syncs only")
+    full = args.mode == "full"
+    if args.page:
+        scope = Scope("pages", page_ids=tuple(args.page), full=True)  # always re-fetched
+    elif args.root is not None:
+        scope = Scope("tree", root=args.root, full=full)
+    else:
+        scope = Scope("cql", cql=args.cql, full=full)
+    with db.connect(settings.dsn) as conn:
+        if any(not m["applied"] for m in db.migration_status(conn)):
+            raise ConfigError(
+                "database has pending migrations; run `confluence-mirror db migrate` first"
+            )
+        try:
+            reports, missing = SpaceSync(conn, client, settings.sync).run_scope(scope)
+        except AuthenticationError:
+            raise
+        except (ConfluenceError, SyncLockedError, ValueError) as exc:
+            log.error("sync of %s failed: %s", scope.kind, exc)
+            return EXIT_FAILED
+    worst = EXIT_OK
+    for report in reports:
+        summary = report.as_dict()
+        summary["errors"] = summary["errors"][:20]
+        print(_json(summary))
+        if report.status != "succeeded":
+            worst = EXIT_PARTIAL
+    if missing:
+        print(_json({"missing": missing, "note": "not visible; not treated as deleted"}))
+        worst = EXIT_PARTIAL
+    if not reports and not missing:
+        print(_json({"status": "succeeded", "note": "the selection matched no pages"}))
+    return worst
 
 
 if __name__ == "__main__":  # pragma: no cover

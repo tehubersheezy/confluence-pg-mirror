@@ -63,6 +63,11 @@ class FakeConfluence:
         # path regex -> list of status codes to return (consumed one per matching request)
         self.failures: list[tuple[re.Pattern[str], list[int]]] = []
         self.hide_from_listing: set[int] = set()
+        # /content/scan behaviour: "cursor" (nextCursor only), "link" (also _links.next) or
+        # None (an older server without the endpoint: 404).
+        self.scan_style: str | None = "cursor"
+        # Page size of embedded collections (labels, children.attachment) in expansions.
+        self.expansion_limit = 25
         self.clock = EPOCH
         self.transport = httpx.MockTransport(self.handle)
 
@@ -192,15 +197,13 @@ class FakeConfluence:
             ],
             "extensions": {"position": page.position if page.position is not None else "none"},
             "metadata": {
-                "labels": {
-                    "results": [
+                "labels": self._collection(
+                    [
                         {"prefix": "global", "name": n, "id": str(abs(hash(n)) % 10**6)}
                         for n in page.labels
                     ],
-                    "start": 0,
-                    "limit": 200,
-                    "size": len(page.labels),
-                }
+                    f"/rest/api/content/{page.id}/label",
+                )
             },
             "_links": {
                 "webui": f"/pages/viewpage.action?pageId={page.id}",
@@ -217,7 +220,36 @@ class FakeConfluence:
             data["body"] = {r: {"value": bodies[r], "representation": r} for r in sorted(wanted)}
         if "restrictions" in expand:
             data["restrictions"] = self._restriction_block(page)
+        parts = expand.split(",")
+        if any(x.startswith("children.attachment") for x in parts):
+            data["children"] = {
+                "attachment": self._collection(
+                    [self.attachment_json(page, a) for a in page.attachments],
+                    f"/rest/api/content/{page.id}/child/attachment",
+                )
+            }
+        keys = [x.split(".", 2)[2] for x in parts if x.startswith("metadata.properties.")]
+        if keys:
+            data["metadata"]["properties"] = {
+                k: {"id": "1", "key": k, "value": page.properties[k], "version": {"number": 1}}
+                for k in keys
+                if k in page.properties
+            }
         return data
+
+    def _collection(self, items: list, next_path: str) -> dict:
+        """An embedded collection as DC returns it: the first page, with a next link."""
+        limit = self.expansion_limit
+        block: dict = {
+            "results": items[:limit],
+            "start": 0,
+            "limit": limit,
+            "size": len(items[:limit]),
+            "_links": {},
+        }
+        if len(items) > limit:
+            block["_links"]["next"] = f"{next_path}?start={limit}&limit={limit}"
+        return block
 
     def attachment_json(self, page: FakePage, att: FakeAttachment) -> dict:
         return {
@@ -241,12 +273,25 @@ class FakeConfluence:
         }
 
     def _cql(self, cql: str, expand: str) -> list[dict]:
-        """A tiny CQL subset: clauses joined by AND over type, space, parent, ancestor, title~."""
+        """A CQL subset: clauses joined by AND over id, type, space, parent, ancestor, title~
+        and lastmodified (attachments)."""
+        clauses = [c.strip() for c in re.split(r"\s+and\s+", cql.strip(), flags=re.I)]
+        clauses = [
+            c[1:-1].strip() if c.startswith("(") and c.endswith(")") and "(" not in c[1:-1] else c
+            for c in clauses
+        ]
+        kinds = [m.group(1) for c in clauses if (m := re.fullmatch(r'type\s*=\s*"?(\w+)"?', c))]
+        if kinds == ["attachment"]:
+            return self._attachment_cql(clauses)
         pages = [p for p in self.pages.values() if p.status == "current"]
-        for clause in re.split(r"\s+AND\s+", cql.strip("() ")):
-            clause = clause.strip("() ")
+        for clause in clauses:
             if m := re.fullmatch(r'type\s*=\s*"?(\w+)"?', clause):
                 pages = [p for p in pages if p.type == m.group(1)]
+            elif m := re.fullmatch(r"id\s+in\s*\(([\d,\s]+)\)", clause, re.I):
+                ids = {int(x) for x in m.group(1).split(",") if x.strip()}
+                pages = [p for p in pages if p.id in ids]
+            elif m := re.fullmatch(r"id\s*=\s*(\d+)", clause):
+                pages = [p for p in pages if p.id == int(m.group(1))]
             elif m := re.fullmatch(r'space\s*=\s*"([^"]+)"', clause):
                 pages = [p for p in pages if p.space_key == m.group(1)]
             elif m := re.fullmatch(r"parent\s*=\s*(\d+)", clause):
@@ -255,9 +300,64 @@ class FakeConfluence:
                 pages = [p for p in pages if int(m.group(1)) in {a.id for a in self._ancestors(p)}]
             elif m := re.fullmatch(r'title\s*~\s*"([^"]+)"', clause):
                 pages = [p for p in pages if m.group(1).lower() in p.title.lower()]
+            elif m := re.fullmatch(r'label\s*=\s*"?([\w-]+)"?', clause):
+                pages = [p for p in pages if m.group(1) in p.labels]
             else:
                 raise AssertionError(f"fake CQL cannot parse {clause!r}")
         return [self.content_json(p, expand) for p in sorted(pages, key=lambda p: p.id)]
+
+    def _attachment_cql(self, clauses: list[str]) -> list[dict]:
+        pages = [p for p in self.pages.values() if p.status == "current"]
+        since = None
+        for clause in clauses:
+            if m := re.fullmatch(r'space\s*=\s*"([^"]+)"', clause):
+                pages = [p for p in pages if p.space_key == m.group(1)]
+            elif m := re.fullmatch(r'lastmodified\s*>=\s*"([^"]+)"', clause):
+                since = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+            elif not re.fullmatch(r'type\s*=\s*"?attachment"?', clause):
+                raise AssertionError(f"fake CQL cannot parse {clause!r}")
+        return [
+            self.attachment_json(p, a)
+            for p in sorted(pages, key=lambda p: p.id)
+            for a in p.attachments
+            if since is None or a.modified >= since
+        ]
+
+    def _scan(self, request: httpx.Request, expand: str) -> httpx.Response:
+        params = request.url.params
+        if self.scan_style is None or (
+            self.scan_style == "pages-only" and params.get("type") != "page"
+        ):
+            return httpx.Response(404, json={"message": "unhandled /rest/api/content/scan"})
+        limit = int(params.get("limit", 25))
+        after = int(params.get("cursor", "content:false:0").rsplit(":", 1)[1] or 0)
+        items = sorted(
+            (
+                p
+                for p in self.pages.values()
+                if p.space_key == params.get("spaceKey")
+                and p.type == params.get("type")
+                and p.status == "current"
+                and p.id not in self.hide_from_listing
+                and p.id > after
+            ),
+            key=lambda p: p.id,
+        )
+        chunk = items[:limit]
+        body: dict = {
+            "results": [self.content_json(p, expand) for p in chunk],
+            "limit": limit,
+            "size": len(chunk),
+            "cursor": params.get("cursor", "content:false:null"),
+            "_links": {"base": self.base_url, "context": self.context},
+        }
+        if len(items) > limit:
+            body["nextCursor"] = f"content:false:{chunk[-1].id}"
+            if self.scan_style == "link":
+                q = dict(params)
+                q["cursor"] = body["nextCursor"]
+                body["_links"]["next"] = f"/rest/api/content/scan?{urlencode(q)}"
+        return httpx.Response(200, json=body)
 
     # -- HTTP ---------------------------------------------------------------------------
 
@@ -338,22 +438,14 @@ class FakeConfluence:
                 out["description"] = {"plain": {"value": space["description"]}}
                 items.append(out)
             return self._paginate(request, items)
-        if path == "/rest/api/content/search" and "lastmodified" not in params.get("cql", ""):
-            return self._paginate(request, self._cql(unquote(params.get("cql", "")), expand))
+        if path == "/rest/api/content/scan":
+            return self._scan(request, expand)
         if path == "/rest/api/content/search":
-            cql = unquote(params.get("cql", ""))
-            space = re.search(r'space = "([^"]+)"', cql).group(1)
-            since = datetime.strptime(
-                re.search(r'lastmodified >= "([^"]+)"', cql).group(1), "%Y-%m-%d %H:%M"
-            ).replace(tzinfo=UTC)
-            items = [
-                self.attachment_json(p, a)
-                for p in self.pages.values()
-                if p.space_key == space and p.status == "current"
-                for a in p.attachments
-                if a.modified >= since
-            ]
-            return self._paginate(request, items)
+            # Server caps (Atlassian KB): 50 with a body expansion, 200 with others, 1000 bare.
+            cap = 50 if "body." in expand else 200 if expand else 1000
+            if int(params.get("limit", 25)) > cap:
+                request.url = request.url.copy_merge_params({"limit": str(cap)})
+            return self._paginate(request, self._cql(unquote(params.get("cql", "")), expand))
         if m := re.fullmatch(r"/rest/api/content/(\d+)(/.*)?", path):
             page = self.pages.get(int(m.group(1)))
             sub = m.group(2) or ""
