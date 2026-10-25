@@ -26,9 +26,20 @@ from confluence_mirror.confex.render import diag_lines, items_table, kv, table, 
 from confluence_mirror.config import PROPERTY_MODES
 from confluence_mirror.inspection import ConfexError
 from confluence_mirror.structure import REPRESENTATIONS
-from confluence_mirror.sync import Scope, SpaceSync, SyncLockedError, reextract
+from confluence_mirror.sync import Scope, SpaceSync, SyncLockedError
 
 REP_CHOICES = ("auto", *REPRESENTATIONS)
+BODY_FORMATS = ("storage", "export_view", "view")
+
+
+def _body_formats(value: str) -> list[str]:
+    formats = [f.strip() for f in value.split(",") if f.strip()]
+    bad = set(formats) - set(BODY_FORMATS)
+    if bad or not set(formats) & set(REPRESENTATIONS):
+        raise argparse.ArgumentTypeError(
+            "use storage, export_view and view; at least one of export_view, view"
+        )
+    return formats
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -37,14 +48,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     dm = leaf(dbg, "db.migrate", "apply pending migrations (the only schema-changing command)")
     dm.add_argument("--target", type=int, metavar="N", help="stop after migration N")
 
-    rx = leaf(sub, "reextract", "rebuild extracted.* macros, tables and links (offline)")
-    rx_scope = rx.add_mutually_exclusive_group()
-    rx_scope.add_argument("--space", metavar="KEY")
-    rx_scope.add_argument("--page", type=int, action="append", metavar="ID")
-    rx.add_argument(
-        "--all-versions", action="store_true", help="every stored version, not just current ones"
-    )
-
     p = leaf(sub, "parse", "persist structural artifacts for stored bodies (offline)")
     scope = p.add_mutually_exclusive_group(required=True)
     scope.add_argument("--space", metavar="KEY")
@@ -52,8 +55,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--representations",
         type=representations_arg,
-        default=["storage", "export_view"],
-        help="comma-separated subset of storage,export_view,view, or 'all'",
+        default=["export_view"],
+        help="comma-separated subset of export_view,view, or 'all' (default export_view)",
     )
     p.add_argument("--all-versions", action="store_true")
 
@@ -70,7 +73,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     mode.add_argument("--metadata-only", action="store_true", help="list pages; fetch no bodies")
     mode.add_argument("--changed-only", action="store_true", help="incremental space sync")
     mode.add_argument("--reconcile", action="store_true", help="full space re-fetch")
-    s.add_argument("--representations", type=representations_arg)
+    s.add_argument(
+        "--representations",
+        type=_body_formats,
+        help="bodies to fetch: a comma-separated subset of storage,export_view,view; "
+        "at least one rendered format (storage is stored but never parsed)",
+    )
     s.add_argument(
         "--properties",
         choices=PROPERTY_MODES,
@@ -123,10 +131,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     pa.add_argument("page_id", type=int)
     pa.add_argument("--include-deleted", action="store_true")
     leaf(pg, "pages.versions").add_argument("page_id", type=int)
-    pm = leaf(pg, "pages.macros")
-    pm.add_argument("page_id", type=int)
-    pm.add_argument("--name")
-    pm.add_argument("--version", dest="page_version", type=int)
     pl = leaf(pg, "pages.links")
     pl.add_argument("page_id", type=int)
     pl.add_argument("--direction", choices=("out", "in", "both"), default="out")
@@ -136,7 +140,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     pd.add_argument("--to-snapshot")
     pd.add_argument("--from-version", type=int)
     pd.add_argument("--to-version", type=int)
-    pd.add_argument("--representation", choices=REP_CHOICES, default="storage")
+    pd.add_argument("--representation", choices=REP_CHOICES, default="auto")
 
     se = leaf(sub, "search", "local substring search, or live CQL")
     se.add_argument("--space", metavar="KEY")
@@ -191,19 +195,6 @@ def _plain_counts(data, args):
     return out
 
 
-@command("reextract", writes=True, plain=_plain_counts)
-def reextract_cmd(args, ctx: Context) -> Result:
-    confluence = ctx.settings.confluence
-    data = reextract(
-        ctx.conn(),
-        base_url=confluence.base_url if confluence else None,
-        space_key=args.space,
-        page_ids=args.page,
-        all_versions=args.all_versions,
-    )
-    return Result(data, exit_code=ins.EXIT_PARTIAL if data["failed"] else ins.EXIT_OK)
-
-
 @command("parse", writes=True, plain=_plain_counts)
 def parse_cmd(args, ctx: Context) -> Result:
     data = ins.parse_pages(
@@ -229,10 +220,6 @@ def sync_scope(args, *, full: bool) -> Scope:
 def sync_cmd(args, ctx: Context) -> Result:
     settings = ctx.settings.sync
     if args.representations:
-        if "storage" not in args.representations:
-            raise ConfexError(
-                "INVALID_ARGUMENT", "--representations must include storage", ins.EXIT_USAGE
-            )
         settings = dataclasses.replace(settings, representations=tuple(args.representations))
     if args.properties:
         settings = dataclasses.replace(settings, page_properties=args.properties)
@@ -302,7 +289,7 @@ def _plain_spaces(data, args):
             [[s["space_key"], s["name"], s["space_type"], s["status"]] for s in data],
         )
     return table(
-        ["key", "name", "type", "status", "pages", "tables(storage)", "last sync"],
+        ["key", "name", "type", "status", "pages", "tables", "last sync"],
         [
             [
                 s["space_key"],
@@ -310,7 +297,7 @@ def _plain_spaces(data, args):
                 s["space_type"],
                 s["status"],
                 s["mirrored_pages"],
-                s["parsed_storage_tables"],
+                s["parsed_tables"],
                 s["last_successful_sync_at"] or "never",
             ]
             for s in data
@@ -590,37 +577,30 @@ def pages_versions(args, ctx: Context) -> Result:
     return Result(ins.page_versions(ctx.conn(), args.page_id))
 
 
-@command(
-    "pages.macros",
-    plain=items_table("macros", ["macro_index", "macro_name", "macro_id", "depth", "parameters"]),
-)
-def pages_macros(args, ctx: Context) -> Result:
-    return Result(ins.page_macros(ctx.conn(), args.page_id, args.name, args.page_version))
-
-
 def _plain_links(data, args):
     out = ""
     if "outbound" in data:
         out += "outbound\n" + table(
-            ["type", "target", "resolution", "text"],
+            ["kind", "target", "resolution", "text"],
             [
                 [
-                    x["link_type"],
-                    x["target_page_id"]
-                    or x["target_title"]
-                    or x["target_url"]
-                    or x["target_filename"]
-                    or x["anchor"],
-                    x["resolution"],
-                    x["link_text"],
+                    x["kind"],
+                    x.get("target_page_id")
+                    or x.get("title")
+                    or x.get("filename")
+                    or x.get("username")
+                    or x.get("anchor")
+                    or x["href"],
+                    x.get("resolution", ""),
+                    x["text"],
                 ]
                 for x in data["outbound"]
             ],
         )
     if "inbound" in data:
         out += "inbound\n" + table(
-            ["from", "title", "type"],
-            [[x["source_page_id"], x["source_title"], x["link_type"]] for x in data["inbound"]],
+            ["from", "title", "space"],
+            [[x["source_page_id"], x["source_title"], x["space_key"]] for x in data["inbound"]],
         )
         out += f"-- {data['inbound_coverage']}\n"
     return out

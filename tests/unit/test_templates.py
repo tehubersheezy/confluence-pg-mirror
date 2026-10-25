@@ -11,13 +11,12 @@ PAGE = (
     "<tr><td>app03</td><td>10.0.0.3</td><td>ok</td></tr></table>"
     "<h2>Contacts</h2>"
     "<table><tr><th>Owner</th><td>Team A</td></tr><tr><th>Escalation</th><td>Ops</td></tr></table>"
-    '<ac:structured-macro ac:name="info"><ac:rich-text-body><p>x</p></ac:rich-text-body>'
-    "</ac:structured-macro>"
+    '<div class="conf-macro output-block" data-macro-name="info"><p>x</p></div>'
 )
 
 
 def summary():
-    artifact = parse_document(PAGE, page_id=11, version=1, representation="storage")
+    artifact = parse_document(PAGE, page_id=11, version=1, representation="export_view")
     return tpl.page_summary(artifact, "Runbook: app", PrivacyPolicy())
 
 

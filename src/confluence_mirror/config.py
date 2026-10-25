@@ -49,7 +49,8 @@ class SyncSettings:
     incremental_overlap_minutes: int = 1440
     refresh_unchanged_metadata: bool = False
     attachment_dir: str | None = None
-    # Body representations fetched per page; storage is always required.
+    # Bodies fetched per page. Storage is mirrored but never parsed; at least one rendered
+    # format (export_view, view) is required, and everything downstream reads those.
     representations: tuple[str, ...] = ("storage", "export_view", "view")
     # Space listing: "scan" (/content/scan, DC 7.18+), "legacy" (/content offset paging) or
     # "auto" (scan, falling back to legacy when the server lacks it).
@@ -199,9 +200,10 @@ def load_settings(
     if bad_types:
         raise ConfigError(f"unsupported content_types: {', '.join(sorted(bad_types))}")
     bad_reps = set(sync.representations) - {"storage", "export_view", "view"}
-    if bad_reps or "storage" not in sync.representations:
+    if bad_reps or not {"export_view", "view"} & set(sync.representations):
         raise ConfigError(
-            "sync.representations must include storage and only name storage, export_view, view"
+            "sync.representations may name storage, export_view and view, and must include "
+            "export_view or view (storage is stored but never parsed)"
         )
     if not 0 < sync.max_delete_fraction <= 1:
         raise ConfigError("sync.max_delete_fraction must be in (0, 1]")

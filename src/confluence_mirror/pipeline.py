@@ -109,11 +109,9 @@ def resolve_scope(
                 }
             )
             continue
-        sel = ins.selection(conn, page_id, version)
-        by_id = {t["table_id"]: (rep, t) for rep, a in artifacts.items() for t in a["tables"]}
-        for s in sel["selections"]:
-            rep, table = by_id[s["table_id"]]
-            targets.append(Target(table, artifacts[rep], page, s["block_reason"]))
+        # Export view is what readers see; view is the fallback when it was not fetched.
+        rep = next(r for r in ins.AUTO_PREFERENCE if r in artifacts)
+        targets.extend(Target(t, artifacts[rep], page) for t in artifacts[rep]["tables"])
     conn.rollback()
     return targets, missing
 

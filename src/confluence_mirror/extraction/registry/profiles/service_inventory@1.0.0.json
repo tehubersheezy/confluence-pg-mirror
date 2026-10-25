@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Header-row tables listing services or applications.",
   "families": ["inventory"],
-  "representations": ["storage", "export_view"],
+  "representations": ["export_view", "view"],
   "schema": "service_inventory.v1",
   "template": {"header": "first_row", "required_fields": ["service_name"], "min_bound_columns": 2},
   "header_bindings": {

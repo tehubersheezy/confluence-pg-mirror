@@ -26,7 +26,7 @@ from confluence_mirror.extraction.privacy import egress_decision
 from confluence_mirror.inspection import ConfexError
 from confluence_mirror.sync import SpaceSync
 
-STAGES = ("sync", "parse", "align", "extract")
+STAGES = ("sync", "parse", "extract")
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -42,7 +42,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     leaf(cg, "config.show")
     leaf(cg, "config.validate")
 
-    r = leaf(sub, "run", "sync -> parse -> align -> extract -> validate; creates review work")
+    r = leaf(sub, "run", "sync -> parse -> extract -> validate; creates review work")
     g = r.add_mutually_exclusive_group(required=True)
     g.add_argument("--space", metavar="KEY")
     g.add_argument("--page", type=int, action="append", metavar="ID")
@@ -254,7 +254,7 @@ def run_cmd(args, ctx: Context) -> Result:
     if lo > hi:
         raise ConfexError("ARGUMENT_CONFLICT", "--from-stage is after --to-stage", ins.EXIT_USAGE)
     stages = order[lo : hi + 1]
-    if args.table and any(s in stages for s in ("sync", "parse", "align")):
+    if args.table and any(s in stages for s in ("sync", "parse")):
         if args.from_stage != "sync":
             raise ConfexError(
                 "ARGUMENT_CONFLICT",
@@ -332,7 +332,7 @@ def run_cmd(args, ctx: Context) -> Result:
                 conn,
                 space_key=args.space,
                 page_ids=page_ids,
-                representations=["storage", "export_view"],
+                representations=["export_view"],
                 all_versions=False,
             )
             results.append(
@@ -342,9 +342,6 @@ def run_cmd(args, ctx: Context) -> Result:
                     "summary": {k: data[k] for k in ("parsed", "reused", "failed")},
                 }
             )
-        elif stage == "align":
-            data = ins.align_pages(conn, space_key=args.space, page_ids=page_ids)
-            results.append({"stage": "align", "status": "succeeded", "summary": data["by_state"]})
         else:
             targets, missing = pipe.resolve_scope(
                 conn, space_key=args.space, page_ids=page_ids, table_ids=args.table

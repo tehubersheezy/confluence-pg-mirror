@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Tables whose columns name a source, an explicit relationship and a target.",
   "families": ["relationship_mapping"],
-  "representations": ["storage", "export_view"],
+  "representations": ["export_view", "view"],
   "schema": "relationship_mapping.v1",
   "template": {"header": "first_row", "required_fields": ["source", "predicate", "target"],
                "min_bound_columns": 3},

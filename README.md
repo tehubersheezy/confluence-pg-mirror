@@ -2,8 +2,9 @@
 
 Mirror Atlassian **Confluence Data Center** spaces into a local **PostgreSQL** database,
 read-only, one space at a time. You get page hierarchy, every body representation, labels,
-properties, attachments, and restrictions. On top of that come structured extractions of
-macros, tables, and page-to-page links, each traceable to the exact markup it came from.
+properties, attachments, and restrictions. Everything derived (document structure, tables,
+links, extracted records) comes from the *rendered* pages, the HTML readers see, and is
+traceable to the exact element it came from.
 
 Everything goes through one command, `confex`: database setup, sync, structural
 inspection of pages and tables, and evidence-backed extraction with human review.
@@ -16,14 +17,14 @@ need PostgreSQL, Python ≥ 3.11 and a personal access token (PAT).
 - **Space-based sync**: discovers every page in a space through the REST API's pagination,
   parents first, and keeps the full parent/child tree (`parent_id`, `ancestor_ids`, `depth`,
   `position`).
-- **All body representations**: `body.storage`, `body.view` and `body.export_view` for every
-  page, including parent pages.
+- **All body representations**: `body.export_view` and `body.view` (rendered HTML, which
+  everything downstream reads) and `body.storage` (mirrored as returned, never parsed:
+  it lacks what macros render, such as includes, page-properties reports and Jira tables).
 - **Metadata**: labels, attachment metadata (binaries optional), direct read/update
   restrictions, and optionally content and space properties.
-- **Extraction**: macros with their parameters, IDs, nesting and bodies; macro-specific
-  interpretations (code, panels, Jira, include/excerpt, page properties, status, …); tables
-  as cells and header-keyed records; links (page, attachment, user, space, URL, anchor,
-  include). Every derived row records the page version, element path and extractor version.
+- **Structure**: `confex parse` turns rendered pages into a document model: headings and
+  sections, tables with exact cell geometry (merged and nested cells), rendered macros and
+  every link, classified by URL (page, attachment, user, external, anchor).
 - **Bulk requests, gentle on rate limits**: the space is listed through `/content/scan`
   (200 pages a request, cursor-paged), and changed pages are fetched 50 at a time with
   bodies, labels, attachments and restrictions in one CQL `id in (...)` request. A
@@ -43,8 +44,8 @@ need PostgreSQL, Python ≥ 3.11 and a personal access token (PAT).
 
 ## Database layout
 
-Source data and derived data live in separate schemas. Everything in `extracted` can be
-rebuilt from `source` offline (`confex reextract`).
+Source data and derived data live in separate schemas. Everything `confex` derives can be
+rebuilt from the rendered bodies in `source` offline (`confex parse`).
 
 | Schema | Table | Contents |
 |---|---|---|
@@ -52,24 +53,23 @@ rebuilt from `source` offline (`confex reextract`).
 | | `space_properties` | space properties (JSONB) |
 | | `pages` | current state of each page: hierarchy, version, deletion/move tracking |
 | | `page_versions` | each version observed (title, parent, author, message) |
-| | `page_content` | storage / view / export_view bodies, one row per (page, version) |
+| | `page_content` | export_view / view / storage bodies, one row per (page, version); storage is never parsed |
 | | `page_labels` | labels (prefix, name) |
 | | `page_properties` | content properties (JSONB) |
 | | `attachments` | attachment metadata, soft-deleted, optional local copy + SHA-256 |
 | | `access_restrictions` | direct read/update restrictions per user/group |
-| `extracted` | `page_macros` | every macro: name, `ac:macro-id`, parameters, nesting, body |
-| | `macro_extractions` | macro-specific structured data (JSONB) |
-| | `page_tables` | tables: cells with spans, header, records |
-| | `page_links` | outgoing links with resolved `target_page_id` |
-| | `parse_artifacts` | `confex` structural parses: document model per body capture (JSONB) |
-| | `table_occurrences` | `confex` table index: geometry status, nesting, heading path |
-| | `search_blocks`, `table_correspondence` | `confex` text projection; cross-representation table matches |
+| `extracted` | `parse_artifacts` | structural parses of rendered bodies: document model, tables, links (JSONB) |
+| | `table_occurrences` | table index: geometry status, nesting, heading path |
+| | `search_blocks` | text projection for local search |
 | `pipeline` | `runs`, `run_items`, `attempts`, `classifications`, `units`, `candidate_revisions`, `validation_results`, `entity_match_proposals`, `template_detections` | `confex` extraction runs, immutable candidates, and model-detected page templates |
-| `review` | `review_events`, `exports`, `export_items`, `correspondence_decisions` | append-only human decisions and export audit |
+| `review` | `review_events`, `exports`, `export_items` | append-only human decisions and export audit |
 | `sync` | `sync_runs` | one row per run: mode, status, counters, per-page errors |
 
-Views `extracted.current_page_content`, `current_page_macros`, `current_page_tables` and
-`current_page_links` restrict to the latest version of non-deleted pages.
+Tables from earlier versions stay in place but are no longer written:
+`extracted.page_macros`, `macro_extractions`, `page_tables` and `page_links` (and their
+`current_*` views) held a storage-format extraction, and `extracted.table_correspondence` /
+`review.correspondence_decisions` matched tables across formats. Parse artifacts made from
+storage bodies are kept as history and ignored.
 
 Migrations are versioned SQL files in `src/confluence_mirror/migrations/`, applied in order
 and checksummed in `sync.schema_migrations`.
@@ -150,7 +150,6 @@ confex sync --root 12345              # one page tree (new or changed pages only
 confex sync --cql 'space = DEMO and label = "runbook"'
 confex sync --page 12345              # named pages, always re-fetched
 confex runs sync --space DEMO         # recent sync runs
-confex reextract --space DEMO         # rebuild extracted.* offline
 ```
 
 Exit codes: `0` success, `2` usage or configuration error, `4` schema not migrated, `6`
@@ -166,10 +165,11 @@ options go before the subcommand.
 
 ```bash
 confex spaces tree DEMO --depth 3 --counts
-confex parse --space DEMO && confex align --space DEMO     # structural artifacts (offline)
-confex pages outline 12345 --representation storage --tables --macros
-confex tables show 12345:t02 --representation storage --view grid
-confex tables show 12345:t02 --representation storage --view cell --cell R3C1
+confex parse --space DEMO                      # structural artifacts (offline)
+confex pages outline 12345 --tables --macros
+confex pages links 12345 --direction both
+confex tables show 12345:t02 --view grid
+confex tables show 12345:t02 --view cell --cell R3C1
 
 confex templates detect --space DEMO --dry-run # parents whose children are all leaves
 confex templates detect --space DEMO           # model: do the children share a template?
@@ -178,7 +178,7 @@ confex extract --page 12345                    # deterministic rules where a tem
 confex review queue --space DEMO
 confex review approve rev_<id> --reason "Checked source cells"
 confex export --space DEMO --approved-only --output ./approved
-confex run --root 12345                        # sync → parse → align → extract → validate
+confex run --root 12345                        # sync → parse → extract → validate
 ```
 
 Merged cells appear as `covered:cN` slots that point at one physical cell. Nested tables
@@ -257,18 +257,14 @@ SELECT repeat('  ', depth) || title FROM source.pages p
 JOIN source.spaces s USING (space_id)
 WHERE s.space_key = 'DEMO' AND NOT is_deleted ORDER BY ancestor_ids || page_id;
 
--- Broken internal links (target title not found in the mirror)
-SELECT page_id, target_space_key, target_title FROM extracted.current_page_links
-WHERE link_type = 'page' AND target_page_id IS NULL;
+-- Links by kind in parsed rendered pages (run `confex parse` first)
+SELECT l->>'kind' AS kind, count(*)
+FROM extracted.parse_artifacts a, jsonb_array_elements(a.document->'links') l
+WHERE a.representation = 'export_view' GROUP BY 1;
 
--- All "Page Properties" values
-SELECT page_id, prop->>'key' AS key, prop->>'value' AS value
-FROM extracted.macro_extractions, jsonb_array_elements(data->'properties') prop
-WHERE extraction_type = 'page-properties';
-
--- Code blocks by language
-SELECT data->>'language', count(*) FROM extracted.macro_extractions
-WHERE extraction_type = 'code' GROUP BY 1;
+-- Pages and their table counts in the latest parse
+SELECT page_id, version_number, table_count FROM extracted.parse_artifacts
+WHERE representation = 'export_view' ORDER BY table_count DESC LIMIT 20;
 ```
 
 ## Security
@@ -279,7 +275,7 @@ WHERE extraction_type = 'code' GROUP BY 1;
   `sync_runs` pass through the same redaction.
 - TLS verification is always on. The client refuses pagination links pointing at another
   host, so the token is only ever sent to the configured instance.
-- Storage XML is parsed with entity resolution and network access disabled (no XXE).
+- Rendered HTML is parsed with network access disabled; storage XML is never parsed.
 - Mirrored content stays in your local database. Nothing is sent to any other service
   unless model extraction is explicitly approved in `[privacy]`.
 
@@ -297,7 +293,7 @@ on your `PATH`, in Postgres.app, or under `/usr/lib/postgresql`, they start a th
 cluster on a private Unix socket and delete it afterwards. Alternatively, set
 `CONFLUENCE_MIRROR_TEST_DSN` to a scratch database you own; its schemas are dropped and
 recreated, so never point it at real data. All test data is synthetic: an in-memory fake
-Confluence in `tests/fake_confluence.py` and storage fixtures in `tests/fixtures/`.
+Confluence in `tests/fake_confluence.py` and rendered-HTML fixtures in `tests/fixtures/render/`.
 
 See [AGENTS.md](AGENTS.md) for architecture decisions and conventions, and
 [docs/agent-setup-prompt.md](docs/agent-setup-prompt.md) for a step-by-step prompt that lets a

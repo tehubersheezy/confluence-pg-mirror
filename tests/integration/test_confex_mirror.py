@@ -59,11 +59,18 @@ def test_mirror_lifecycle(env, raw_conn, capsys, caplog):
     assert [r["space_key"] for r in e["data"]["runs"]] == ["DEMO", "OTHER"]
     assert all(r["status"] == "succeeded" for r in e["data"]["runs"])
 
-    raw_conn.execute("DELETE FROM extracted.page_macros")
-    raw_conn.commit()
+    # Sync stores storage bodies but derives nothing from them; structure comes from
+    # parsing the rendered bodies.
+    assert scalar(raw_conn, "SELECT count(*) FROM source.page_content") == 6
+    assert scalar(raw_conn, "SELECT count(*) FROM extracted.page_macros") == 0
+    code, e = run(capsys, "parse", "--space", "DEMO")
+    assert code == 0 and e["data"]["parsed"] == 5
+    assert (
+        scalar(raw_conn, "SELECT count(DISTINCT representation) FROM extracted.parse_artifacts")
+        == 1
+    )
     code, e = run(capsys, "reextract", "--space", "DEMO")
-    assert code == 0 and e["data"]["extracted"] == 5
-    assert scalar(raw_conn, "SELECT count(*) FROM extracted.page_macros") > 0
+    assert code == inspection.EXIT_USAGE  # removed with the storage extractor
 
     code, e = run(capsys, "runs", "sync", "--space", "DEMO")
     assert e["data"][0]["status"] == "succeeded" and e["data"][0]["space_key"] == "DEMO"

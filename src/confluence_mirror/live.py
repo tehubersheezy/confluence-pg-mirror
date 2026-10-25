@@ -146,7 +146,7 @@ def page_attachments(client: ConfluenceClient, page_id: int) -> dict:
 def page_read(
     client: ConfluenceClient, page_id: int, representation: str, mode: str, section_id: str | None
 ) -> dict:
-    rep = "storage" if representation == "auto" else representation
+    rep = "export_view" if representation == "auto" else representation
     if rep not in REPRESENTATIONS:
         raise ConfexError("UNSUPPORTED_MODE", f"unknown representation {rep}", EXIT_UNAVAILABLE)
     content = _content(client, page_id, expand=f"version,body.{rep}")
@@ -167,7 +167,7 @@ def page_read(
             "body": body,
         }
     artifact = parse_document(body, page_id=page_id, version=version, representation=rep)
-    reason = "auto: storage" if representation == "auto" else "requested"
+    reason = "auto: export_view" if representation == "auto" else "requested"
     return read_text(Resolved(artifact, "ephemeral_parse", reason), section_id)
 
 

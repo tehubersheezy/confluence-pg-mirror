@@ -30,13 +30,13 @@ REG = load_registry()
 MODEL = ModelSettings().as_dict()
 
 
-def doc(body, rep="storage"):
+def doc(body, rep="export_view"):
     return parse_document(body, page_id=7, version=1, representation=rep)
 
 
 @pytest.fixture
 def geometry():
-    return doc((FIXTURES / "storage" / "geometry_page.xml").read_text(encoding="utf-8"))
+    return doc((FIXTURES / "render" / "geometry_page.html").read_text(encoding="utf-8"))
 
 
 def routed(artifact, table, profile):

@@ -240,9 +240,7 @@ Then show the user what was mirrored:
 "$PGBIN/psql" -h /tmp -p 5433 -d confluence_mirror -c "
 SELECT (SELECT count(*) FROM source.pages WHERE NOT is_deleted) AS pages,
        (SELECT count(*) FROM source.attachments WHERE NOT is_deleted) AS attachments,
-       (SELECT count(*) FROM extracted.page_macros) AS macros,
-       (SELECT count(*) FROM extracted.page_links) AS links,
-       (SELECT count(*) FROM extracted.page_tables) AS tables;"
+       (SELECT count(*) FROM source.page_content) AS bodies;"
 ```
 Report the numbers only, not page titles or content.
 

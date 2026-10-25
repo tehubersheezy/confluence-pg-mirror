@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Key/value tables: header cells down the first column, values beside them.",
   "families": ["key_value"],
-  "representations": ["storage", "export_view"],
+  "representations": ["export_view", "view"],
   "schema": "key_value_config.v1",
   "template": {"header": "first_column", "required_fields": ["key"], "min_bound_columns": 0},
   "header_bindings": {},

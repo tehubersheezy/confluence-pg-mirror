@@ -56,7 +56,7 @@ def test_run_drives_every_stage_and_never_approves(env, conn, capsys, caplog):
     assert scalar(conn, "SELECT count(*) FROM pipeline.candidate_revisions") == 0
 
     code, e = run(capsys, "run", "--space", "DEMO", "--dry-run")
-    assert e["data"]["would_run"] == ["sync", "parse", "align", "extract"]
+    assert e["data"]["would_run"] == ["sync", "parse", "extract"]
     assert scalar(conn, "SELECT count(*) FROM source.pages") == 0  # a dry run syncs nothing
 
     code, e = run(capsys, "run", "--space", "DEMO")
@@ -65,7 +65,6 @@ def test_run_drives_every_stage_and_never_approves(env, conn, capsys, caplog):
     assert stages == {
         "sync": "succeeded",
         "parse": "succeeded",
-        "align": "succeeded",
         "extract": "succeeded",
     }
     assert e["data"]["awaiting_review"] >= 2
@@ -155,9 +154,9 @@ def test_concurrent_identical_artifact_commits(pg_dsn, conn, rich_storage):
     fake = FakeConfluence()
     demo_space(fake, rich_storage)
     sync(conn, fake)
-    body = repo.storage_body(conn, 1001, 1)
+    body = repo.stored_bodies(conn, 1001, 1)["bodies"]["export_view"]
     conn.rollback()
-    artifact = parse_document(body, page_id=1001, version=1, representation="storage")
+    artifact = parse_document(body, page_id=1001, version=1, representation="export_view")
     other = db.connect(pg_dsn)
     try:
         with conn.transaction():
