@@ -23,7 +23,7 @@ def body_fetches(fake):
 
 
 def test_full_sync_mirrors_space(conn, fake):
-    report = sync(conn, fake)
+    report = sync(conn, fake, page_properties="all")
     assert report.mode == "full" and report.status == "succeeded", report.errors
     assert report.counters.pages_listed == 5 and report.counters.pages_fetched == 5
 

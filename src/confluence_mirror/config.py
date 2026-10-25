@@ -38,6 +38,9 @@ class ConfluenceSettings:
     max_requests_per_second: float = 5.0
 
 
+PROPERTY_MODES = ("none", "all")
+
+
 @dataclass(frozen=True)
 class SyncSettings:
     spaces: tuple[str, ...] = ()
@@ -54,9 +57,10 @@ class SyncSettings:
     listing_page_size: int = 200
     # Pages per bulk fetch (CQL id in (...)); the server caps body expansions at 50.
     body_batch_size: int = 50
-    # Content properties: "all" (one request per fetched page), "none", or a list of keys
-    # fetched in bulk through metadata.properties.<key> expansions.
-    page_properties: str | tuple[str, ...] = "all"
+    # Content properties (page and space). "none": not fetched, no requests. "all": every
+    # key, one extra request per fetched page plus one per space. A list of keys: fetched
+    # inside the batch requests (metadata.properties.<key>), no extra requests.
+    page_properties: str | tuple[str, ...] = "none"
 
 
 @dataclass(frozen=True)
@@ -207,8 +211,8 @@ def load_settings(
         raise ConfigError("sync.body_batch_size must be between 1 and 50 (server cap)")
     if not 1 <= sync.listing_page_size <= 1000:
         raise ConfigError("sync.listing_page_size must be between 1 and 1000")
-    if isinstance(sync.page_properties, str) and sync.page_properties not in ("all", "none"):
-        raise ConfigError('sync.page_properties must be "all", "none" or a list of keys')
+    if isinstance(sync.page_properties, str) and sync.page_properties not in PROPERTY_MODES:
+        raise ConfigError('sync.page_properties must be "none", "all" or a list of keys')
     if isinstance(sync.page_properties, tuple) and not all(
         isinstance(k, str) and k and "," not in k for k in sync.page_properties
     ):

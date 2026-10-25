@@ -32,6 +32,8 @@ log = logging.getLogger(__name__)
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 MAX_BACKOFF = 60.0
+# After a 429 the client halves its request rate for the rest of its life, down to this.
+MIN_RATE = 0.25
 
 CONTENT_EXPAND_LIST = "version,ancestors,space,history,metadata.labels,extensions.position"
 CONTENT_EXPAND_FULL = ",".join(
@@ -136,6 +138,8 @@ class ConfluenceClient:
         self.settings = settings
         self._clock = clock
         self._next_slot = 0.0
+        self._rate = settings.max_requests_per_second
+        self.retry_counts: dict[str, int] = {}
         # Requests sent (retries included), by endpoint kind; reported in sync stats.
         self.request_counts: dict[str, int] = {}
         self.base_url = settings.base_url.rstrip("/")
@@ -183,8 +187,23 @@ class ConfluenceClient:
             return self._origin + path_or_url
         return self.base_url + path_or_url
 
+    @property
+    def rate(self) -> float:
+        """Current request-rate ceiling (0 = none); lowered by 429 responses."""
+        return self._rate
+
+    def _slow_down(self) -> None:
+        current = self._rate or 4.0  # an unlimited client that was rate-limited
+        slower = max(current / 2, MIN_RATE)
+        if slower < current or not self._rate:
+            log.warning("rate limited; slowing to %.2f requests/s", slower)
+        self._rate = slower
+
+    def _retried(self, kind: str) -> None:
+        self.retry_counts[kind] = self.retry_counts.get(kind, 0) + 1
+
     def _throttle(self) -> None:
-        rate = self.settings.max_requests_per_second
+        rate = self._rate
         if not rate:
             return
         now = self._clock()
@@ -215,6 +234,7 @@ class ConfluenceClient:
                         f"transport error for {urlsplit(url).path}: {exc}"
                     ) from exc
                 delay = self._backoff(attempt, None)
+                self._retried("transport")
                 log.warning(
                     "transport error (%s); retry %d in %.1fs",
                     type(exc).__name__,
@@ -226,6 +246,9 @@ class ConfluenceClient:
                 continue
             if response.status_code in RETRY_STATUSES and attempt < self.settings.max_retries:
                 delay = self._backoff(attempt, response.headers.get("Retry-After"))
+                self._retried(str(response.status_code))
+                if response.status_code == 429:
+                    self._slow_down()
                 log.warning(
                     "HTTP %d for %s; retry %d in %.1fs",
                     response.status_code,

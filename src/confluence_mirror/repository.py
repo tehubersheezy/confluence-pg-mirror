@@ -410,6 +410,18 @@ def replace_page_properties(conn, page_id: int, rows: list[dict], run_id: int) -
     _reconcile(conn, "source.page_properties", page_id, rows, ["property_key"], run_id)
 
 
+def upsert_page_properties(conn, page_id: int, rows: list[dict], run_id: int) -> None:
+    """Add or update the given keys only; other stored properties are left alone."""
+    for row in rows:
+        _upsert(
+            conn,
+            "source.page_properties",
+            dict(row, page_id=page_id, last_sync_run_id=run_id),
+            ["page_id", "property_key"],
+            extra_update="last_seen_at = now()",
+        )
+
+
 def replace_restrictions(conn, page_id: int, rows: list[dict], run_id: int) -> None:
     _reconcile(
         conn,

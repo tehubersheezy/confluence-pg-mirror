@@ -48,8 +48,8 @@ def test_full_sync_uses_a_handful_of_requests(conn):
     assert kinds["scan"] == 1
     assert kinds["search"] == 3  # ceil(120 / 50) body batches
     assert "single" not in kinds
-    assert kinds.get("property", 0) == 1  # the space's properties; pages' come in the batches
-    assert len(f.requests) <= 8  # space, space properties, scan, 3 batches
+    assert "property" not in kinds  # named keys come in the batches; no space properties
+    assert len(f.requests) == 5  # space, scan, 3 batches
     assert report.stats["listing"] == {"page": "scan"}
     assert report.stats["http_requests"]["/rest/api/content/search"] == 3
     # Properties named in page_properties come from the bulk expansion.
@@ -65,8 +65,51 @@ def test_full_sync_uses_a_handful_of_requests(conn):
 
 def test_properties_all_costs_one_request_per_page(conn):
     f = big_space(10)
-    sync(conn, f, space="BIG")
+    sync(conn, f, space="BIG", page_properties="all")
     assert requests_by_kind(f)["property"] == 1 + 10  # space properties + one per page
+
+
+def test_default_sync_makes_no_property_requests(conn):
+    f = big_space(60)
+    sync(conn, f, space="BIG", page_properties="all")
+    assert scalar(conn, "SELECT count(*) FROM source.page_properties") == 1
+    f.requests.clear()
+
+    report = sync(conn, f, space="BIG", mode="full")  # default: page_properties = "none"
+    assert report.status == "succeeded", report.errors
+    assert not [r for r in f.requests if "/property" in r.url.path]
+    assert report.stats["http_requests"] == {
+        "/rest/api/content/scan": 1,
+        "/rest/api/content/search": 2,  # ceil(60 / 50) batches
+        "/rest/api/space/BIG": 1,
+    }
+    # Stored properties are left as they were, not deleted.
+    assert scalar(conn, "SELECT count(*) FROM source.page_properties") == 1
+    assert scalar(conn, "SELECT count(*) FROM source.space_properties") == 0
+
+
+def test_key_list_leaves_other_properties_alone(conn):
+    f = big_space(3)
+    sync(conn, f, space="BIG", page_properties="all")
+    f.pages[50000].properties = {"owner": {"team": "y"}, "extra": 1}
+    sync(conn, f, space="BIG", mode="full", page_properties=("extra",))
+    assert rows(
+        conn, "SELECT property_key FROM source.page_properties WHERE page_id = 50000 ORDER BY 1"
+    ) == [("extra",), ("owner",)]
+
+
+def test_rate_limit_slows_the_client_and_is_reported(conn, fake):
+    fake.fail(r"/rest/api/content/scan$", 429, 429)
+    syncer = SpaceSync(conn, client_for(fake, max_requests_per_second=4), SyncSettings())
+    report = syncer.run("DEMO", "auto")
+    assert report.status == "succeeded"
+    assert report.stats["http_retries"] == {"429": 2}
+    assert report.stats["requests_per_second"] == 1.0  # 4 -> 2 -> 1
+    # Stats are per run: a second space's run does not inherit the first one's counts.
+    other = syncer.run("OTHER", "auto")
+    assert "http_retries" not in other.stats
+    assert "/rest/api/content/scan" in other.stats["http_requests"]
+    assert other.stats["http_requests"]["/rest/api/space/OTHER"] == 1
 
 
 @pytest.mark.parametrize("style", ["cursor", "link"])

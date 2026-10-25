@@ -108,3 +108,14 @@ def test_credentials(env, monkeypatch, capsys):
     assert code == inspection.EXIT_POLICY and e["error"]["code"] == "AUTHENTICATION_FAILED"
     code, e = run(capsys, "doctor", "--check-confluence")
     assert {c["check"]: c["ok"] for c in e["data"]["checks"]}["confluence"] is False
+
+
+def test_properties_override(env, raw_conn, capsys):
+    run(capsys, "db", "migrate")
+    code, e = run(capsys, "sync", "--space", "DEMO")
+    assert code == 0 and "/property" not in str(e["data"]["stats"]["http_requests"])
+    assert scalar(raw_conn, "SELECT count(*) FROM source.page_properties") == 0
+    code, e = run(capsys, "sync", "--space", "DEMO", "--reconcile", "--properties", "all")
+    assert code == 0
+    assert scalar(raw_conn, "SELECT count(*) FROM source.page_properties") == 1
+    assert e["data"]["stats"]["http_requests"]["/rest/api/content/{id}/property"] == 5

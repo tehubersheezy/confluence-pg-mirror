@@ -186,3 +186,10 @@ def test_negative_rate_rejected(tmp_path):
     text = BASE.replace("[confluence]", "[confluence]\nmax_requests_per_second = -1")
     with pytest.raises(ConfigError, match="max_requests_per_second"):
         load_settings(write(tmp_path, text), env={})
+
+
+def test_page_properties_default_is_none(tmp_path):
+    s = load_settings(write(tmp_path, BASE), env={})
+    assert s.sync.page_properties == "none"
+    text = BASE.replace("[sync]", '[sync]\npage_properties = "all"')
+    assert load_settings(write(tmp_path, text), env={}).sync.page_properties == "all"

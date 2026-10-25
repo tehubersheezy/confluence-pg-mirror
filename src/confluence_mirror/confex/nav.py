@@ -23,6 +23,7 @@ from confluence_mirror.confex.core import (
     safe,
 )
 from confluence_mirror.confex.render import diag_lines, items_table, kv, table, tree_lines
+from confluence_mirror.config import PROPERTY_MODES
 from confluence_mirror.inspection import ConfexError
 from confluence_mirror.structure import REPRESENTATIONS
 from confluence_mirror.sync import Scope, SpaceSync, SyncLockedError, reextract
@@ -70,6 +71,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     mode.add_argument("--changed-only", action="store_true", help="incremental space sync")
     mode.add_argument("--reconcile", action="store_true", help="full space re-fetch")
     s.add_argument("--representations", type=representations_arg)
+    s.add_argument(
+        "--properties",
+        choices=PROPERTY_MODES,
+        help="content properties for this run: none (default; no requests) or "
+        "all (one request per fetched page)",
+    )
 
     sp = group(sub, "spaces", "spaces")
     sl = leaf(sp, "spaces.list")
@@ -227,6 +234,8 @@ def sync_cmd(args, ctx: Context) -> Result:
                 "INVALID_ARGUMENT", "--representations must include storage", ins.EXIT_USAGE
             )
         settings = dataclasses.replace(settings, representations=tuple(args.representations))
+    if args.properties:
+        settings = dataclasses.replace(settings, page_properties=args.properties)
     conn, client = ctx.conn(), ctx.client()
     syncer = SpaceSync(conn, client, settings)
     reports: list = []
