@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from confluence_mirror import inspection as ins
 from confluence_mirror import repository as repo
@@ -105,6 +106,8 @@ def tables_show(args, ctx: Context) -> Result:
         version=args.page_version,
         snapshot=args.snapshot,
     )
+    if args.view == "payload":
+        return _payload_view(args, ctx, resolved, tbl)
     data = ins.table_view(
         conn,
         resolved,
@@ -136,6 +139,26 @@ def plain_table_view(data: dict, args: argparse.Namespace) -> str:
     )
     view = args.view
     width = args.max_col_width
+    if view == "payload":
+        unit = data["unit"]
+        out = head + kv(
+            [
+                ("preview", data["preview_kind"]),
+                (
+                    "classification",
+                    f"{data['classification_id']} ({data['classification_source']})",
+                ),
+                ("profile", data["profile"]),
+                ("unit", f"{unit['unit_id']} chunk {unit['chunk_index']}/{unit['chunk_count']}"),
+                ("rows", unit["selected_rows"]),
+                ("extractor", data["extractor"]),
+                ("egress", data["egress"]),
+                ("redactions", data["redactions"]),
+                ("estimated_input_tokens", f"{data['estimated_input_tokens']} (local estimate)"),
+                *data["hashes"].items(),
+            ]
+        )
+        return out + json.dumps(data["request"], indent=2, ensure_ascii=False) + "\n"
     if view == "grid":
         sel = data["selection"]
         c_lo, c_hi = sel["cols"]
@@ -336,3 +359,24 @@ def _plain_align(data, args):
 def align_cmd(args, ctx: Context) -> Result:
     data = ins.align_pages(ctx.conn(), space_key=args.space, page_ids=args.page)
     return Result(data)
+
+
+def _payload_view(args, ctx: Context, resolved: ins.Resolved, tbl: dict) -> Result:
+    """The production serializer's unit, payload and request; no model call, no writes."""
+    from confluence_mirror import pipeline as pipe
+    from confluence_mirror.confex.extract import options, pipeline_for
+
+    if args.stage != "extract":
+        raise ins.ConfexError(
+            "UNSUPPORTED_MODE", "only --stage extract payloads can be previewed", ins.EXIT_USAGE
+        )
+    p = pipeline_for(ctx)
+    target = pipe.Target(
+        tbl, resolved.artifact, repo.get_page(ctx.conn(), resolved.artifact["page_id"])
+    )
+    ns = argparse.Namespace(
+        profile=args.profile, extractor=None, force=False, model_classification=False
+    )
+    data = p.preview(target, options(ns, ctx), args.chunk)
+    data["identity"] = ins.identity(resolved, tbl)
+    return Result(data, source=_source(resolved))

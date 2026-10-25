@@ -1,0 +1,44 @@
+{
+  "profile_id": "host_inventory",
+  "version": "1.0.0",
+  "description": "Header-row tables listing hosts or servers, one or more per row.",
+  "families": ["inventory"],
+  "representations": ["storage", "export_view"],
+  "schema": "host_inventory.v1",
+  "template": {
+    "header": "first_row",
+    "required_fields": ["hostname"],
+    "min_bound_columns": 2
+  },
+  "header_bindings": {
+    "hostname": ["host", "hosts", "hostname", "host name", "server", "servers", "server name", "node", "nodes"],
+    "ip_address": ["ip", "ips", "ip address", "ip addresses", "address", "addresses"],
+    "environment": ["environment", "env"],
+    "operating_system": ["os", "operating system"],
+    "role": ["role"],
+    "location": ["location", "site", "data center", "datacenter", "dc"],
+    "service": ["service", "application", "app", "system"],
+    "owner": ["owner", "owned by", "team"],
+    "notes": ["notes", "comment", "comments"]
+  },
+  "record_granularity": {"per_row": true, "explode_field": "hostname"},
+  "multivalue": {
+    "hostname": {"grammar": "list", "separators": [",", ";", "\n"]},
+    "ip_address": {"grammar": "list", "separators": [",", ";", "\n", " "]},
+    "location": {"grammar": "never"},
+    "role": {"grammar": "never", "flag_compound": ["/", "&"]}
+  },
+  "context_inheritance": [
+    {"field": "environment", "from": "heading",
+     "pattern": "(?i)\\b(production|prod|staging|stage|test|development|dev|dr|disaster recovery|qa|uat)\\b"},
+    {"field": "service", "from": "parent_row", "parent_fields": ["service"]}
+  ],
+  "relationships": {
+    "member_of_service": {"from_field": "service"}
+  },
+  "required_evidence": ["cell", "heading", "paragraph"],
+  "chunking": {"max_rows": 40, "nested": "separate_units"},
+  "privacy_policy": "default",
+  "review": {"require_human_approval": true, "export_blocking_issues": ["model_inferred"]},
+  "extractor": {"default": "rules", "allow_model": true, "effort": "medium"}
+}

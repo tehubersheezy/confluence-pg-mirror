@@ -1,0 +1,19 @@
+{
+  "schema_id": "service_inventory",
+  "version": "1",
+  "description": "Services or applications documented in inventory tables.",
+  "record_kinds": ["service"],
+  "identity_fields": ["service_name", "environment"],
+  "fields": {
+    "service_name": {"type": "string", "required": true},
+    "environment": {"type": "string"},
+    "owner_team": {"type": "string"},
+    "tier": {"type": "string"},
+    "url": {"type": "url"},
+    "hosts": {"type": "hostname", "multivalue": true},
+    "description": {"type": "string"}
+  },
+  "relationships": {
+    "runs_on": {"source_kind": "service", "target": "key", "target_kind": "host"}
+  }
+}

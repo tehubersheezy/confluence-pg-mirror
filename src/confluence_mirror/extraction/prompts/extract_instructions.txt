@@ -1,0 +1,21 @@
+Extract records for schema {schema_ref} using extraction profile {profile_ref}.
+
+Evidence format: "cells" lists the table's physical cells with 1-based coordinates ("R3C2")
+and merged spans ("R2C1:R3C1"); each cell's text is in "blocks". Header cells carry
+row_role "header". "columns" gives the approved column-to-field bindings. "context" holds the
+heading path and nearby paragraphs; "parent_context", when present, is the row of the parent
+table that contains this nested table. Placeholders such as [REDACTED:credential:1] stand for
+removed text; never guess what they contain, and report such a field as "redacted".
+
+Fields: {fields}
+Record kinds: {record_kinds}
+Multivalue rules: {multivalue}
+Context inheritance allowed: {inheritance}
+
+Selected rows to account for: {selected_rows}
+
+Example (synthetic): a cell R2C3 with block "blk_a" text "db01, db02" under a "Servers" column
+bound to hostname, with list semantics, yields two records, one per host, each citing its own
+span: {{"block_id": "blk_a", "start": 0, "end": 4, "quote": "db01"}} and
+{{"block_id": "blk_a", "start": 6, "end": 10, "quote": "db02"}}. A location "New York, NY" is one
+value. "db01-db10" is not expanded.

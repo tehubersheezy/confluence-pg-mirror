@@ -721,14 +721,6 @@ def table_view(
             "note": "serialized from the parsed tree; not a byte-exact slice of the stored body",
             "markup": table["source_markup"],
         }
-    if view == "payload":
-        raise ConfexError(
-            "PAYLOAD_NOT_READY",
-            "no classification, extraction profile or schema exists for this table yet; "
-            "classification and extraction are not implemented in this release",
-            EXIT_UNAVAILABLE,
-            {"table_id": table["table_id"], "requires": ["confex classify", "extraction profile"]},
-        )
     raise ConfexError("UNSUPPORTED_MODE", f"unknown view {view!r}", EXIT_USAGE)
 
 

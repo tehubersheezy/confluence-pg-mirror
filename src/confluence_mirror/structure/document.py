@@ -46,7 +46,7 @@ from confluence_mirror.structure.ids import (
 )
 
 # Bump when artifact output changes; it is part of every artifact fingerprint.
-PARSER_VERSION = "structure.1"
+PARSER_VERSION = "structure.2"
 REPRESENTATIONS = ("storage", "export_view", "view")
 EVIDENCE_TEXT_POLICY = "evidence-text.v1"
 

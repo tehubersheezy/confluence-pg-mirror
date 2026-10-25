@@ -26,6 +26,22 @@ ADDITIONS = {
     "table_correspondence": "extracted",
     "superseded_bodies": "source",
     "correspondence_decisions": "review",
+    **{
+        t: "pipeline"
+        for t in (
+            "runs",
+            "run_items",
+            "attempts",
+            "classifications",
+            "units",
+            "candidate_revisions",
+            "validation_results",
+            "entity_match_proposals",
+        )
+    },
+    "review_events": "review",
+    "exports": "review",
+    "export_items": "review",
 }
 
 

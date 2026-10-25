@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import sys
 
-from confluence_mirror.confex import core, nav, tables
+from confluence_mirror.confex import core, extract, nav, review, runs, tables
 
-MODULES = [nav, tables]
+MODULES = [nav, tables, extract, runs, review]
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,0 +1,15 @@
+{
+  "schema_id": "relationship_mapping",
+  "version": "1",
+  "description": "Directed relationships stated explicitly in a mapping table.",
+  "record_kinds": ["relationship"],
+  "identity_fields": ["source", "predicate", "target"],
+  "fields": {
+    "source": {"type": "string", "required": true},
+    "predicate": {"type": "enum", "required": true,
+                  "values": ["depends_on", "runs_on", "owned_by", "connects_to"]},
+    "target": {"type": "string", "required": true},
+    "notes": {"type": "string"}
+  },
+  "relationships": {}
+}

@@ -1,0 +1,21 @@
+{
+  "schema_id": "host_inventory",
+  "version": "1",
+  "description": "Hosts documented in inventory tables. Candidate documented data, not discovered CIs.",
+  "record_kinds": ["host"],
+  "identity_fields": ["hostname"],
+  "fields": {
+    "hostname": {"type": "hostname", "required": true, "description": "Host or server name as written"},
+    "ip_address": {"type": "ip_address", "multivalue": true, "description": "IPv4 or IPv6 address"},
+    "environment": {"type": "string", "description": "Environment such as production, staging, DR"},
+    "operating_system": {"type": "string"},
+    "role": {"type": "string", "description": "Role of the host; compound values are preserved"},
+    "location": {"type": "string", "description": "Site or data center; commas do not separate values"},
+    "service": {"type": "string", "description": "Service or application the host belongs to"},
+    "owner": {"type": "string"},
+    "notes": {"type": "string"}
+  },
+  "relationships": {
+    "member_of_service": {"source_kind": "host", "target": "key", "target_kind": "service"}
+  }
+}
